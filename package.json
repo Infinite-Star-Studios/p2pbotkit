@@ -1,0 +1,27 @@
+{
+  "name": "saturn-p2p-bot-kit",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Saturn P2P bot kit: run your own maker or taker bot against the public P2P board, with your own keys on your own machine.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts",
+    "check": "tsc --noEmit",
+    "seller": "tsx examples/seller-bot.ts",
+    "buyer": "tsx examples/buyer-bot.ts",
+    "faucet": "tsx examples/faucet.ts"
+  },
+  "dependencies": {
+    "phantasma-sdk-ts": "0.4.0",
+    "viem": "2.57.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

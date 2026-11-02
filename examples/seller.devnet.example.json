@@ -1,0 +1,15 @@
+{
+  "network": "devnet",
+  "api": "https://apiops.saturnx.cc",
+  "apiKeyFile": null,
+  "keys": { "pha": "./keys/seller-pha.json", "base": "./keys/seller-base.json" },
+  "dataDir": "./data/seller",
+  "offers": [
+    { "symbol": "TAZ", "total": "30", "min": "1", "max": "5", "price": "1.08" },
+    { "symbol": "RA", "total": "6", "min": "1", "max": "2", "follow": { "offsetBps": 200, "limitPrice": "1.90" } }
+  ],
+  "take": { "symbol": "TAZ", "minPrice": "1.05", "amount": "2", "everyS": 120 },
+  "acceptOnTheirOwn": true,
+  "acceptAfterS": 0,
+  "claimMode": "self"
+}

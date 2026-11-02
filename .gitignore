@@ -1,0 +1,18 @@
+# The bot's own state and keys never leave the machine that runs it.
+data/
+keys/
+node_modules/
+
+# The Node that start.sh downloads when the machine has no Node 22 or later.
+.node/
+.node-download/
+
+# The store key (README, "Encrypting the store") and an API key file kept
+# outside keys/ are secrets like the keys.
+store.key
+*.key
+api-key*
+
+# The kit's lockfile IS tracked: start.sh and the quick start install exactly
+# these versions with `npm ci --ignore-scripts`.
+!package-lock.json
