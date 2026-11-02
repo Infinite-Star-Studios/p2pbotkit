@@ -17,12 +17,12 @@ the hash-lock on both chains that secures every swap on the P2P board.
 | `P2PBotKit_Mark_Color.svg` | The emblem without words: avatars and small spaces. 96 px or more. |
 | `P2PBotKit_Horizontal_Color.svg` | Mark, name and tagline in one line, for dark backgrounds. 320 px wide or more. |
 | `P2PBotKit_Horizontal_Color-Light.svg` | The same, for light backgrounds. |
-| `favicon.svg` | The bot's face in a gold rim, for browser tabs and app icons (16 to 180 px). |
+| `favicon.svg` | The bot's face in a gold rim, for browser tabs (16 to 180 px) and app icons. |
 | `p2p-bot-kit-colors.css`, `p2p-bot-kit-colors.json` | The colours, as CSS variables and as data. |
 
-Every logo in every colourway (Color, Color-Light, Ivory, White, Navy and
-Black) as SVG and PNG, the icons and the brand sheet are on the Saturn media
-page: https://ops.saturnx.cc/media#p2p
+Every logo in each of its colourways (Color, Ivory, White, Navy and Black,
+plus Color-Light for the name lockups) as SVG and PNG, the icons and the
+brand sheet are on the Saturn media page: https://ops.saturnx.cc/media#p2p
 
 ## Using them
 
