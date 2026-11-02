@@ -1,0 +1,55 @@
+{
+  "name": "Saturn P2P Bot Kit DEV",
+  "palette": "Saturn Navigator",
+  "made": "2026-11-02",
+  "colors": {
+    "navy": {
+      "hex": "#0B1626",
+      "use": "band, backgrounds, visor"
+    },
+    "space": {
+      "hex": "#070E1A",
+      "use": "patch field"
+    },
+    "ivory": {
+      "hex": "#F1EADC",
+      "use": "words, the bot"
+    },
+    "gold": {
+      "hex": "#CDA869",
+      "use": "rim, Saturn mark, key, padlock, stars"
+    },
+    "cyan": {
+      "hex": "#4FD3E3",
+      "use": "gear, circuits, bridge, eyes, links"
+    },
+    "cyan-hover": {
+      "hex": "#8FE6EF",
+      "use": "link hover"
+    },
+    "slate": {
+      "hex": "#8E99AA",
+      "use": "bezel ticks, secondary text"
+    },
+    "periwinkle": {
+      "hex": "#8EA2FF",
+      "use": "second planet, chart colour 3"
+    },
+    "surface": {
+      "hex": "#102036",
+      "use": "cards on navy"
+    },
+    "raised": {
+      "hex": "#172A42",
+      "use": "raised cards"
+    },
+    "line": {
+      "hex": "#253B56",
+      "use": "borders, orbit line"
+    }
+  },
+  "fonts": {
+    "words": "Lexend (SemiBold 600 for names)",
+    "code": "JetBrains Mono (Medium 500)"
+  }
+}

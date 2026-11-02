@@ -1,0 +1,16 @@
+/* Saturn P2P Bot Kit DEV colours (Saturn Navigator palette). Made 2 Nov 2026. */
+:root {
+  --p2p-navy: #0B1626; /* band, backgrounds, visor */
+  --p2p-space: #070E1A; /* patch field */
+  --p2p-ivory: #F1EADC; /* words, the bot */
+  --p2p-gold: #CDA869; /* rim, Saturn mark, key, padlock, stars */
+  --p2p-cyan: #4FD3E3; /* gear, circuits, bridge, eyes, links */
+  --p2p-cyan-hover: #8FE6EF; /* link hover */
+  --p2p-slate: #8E99AA; /* bezel ticks, secondary text */
+  --p2p-periwinkle: #8EA2FF; /* second planet, chart colour 3 */
+  --p2p-surface: #102036; /* cards on navy */
+  --p2p-raised: #172A42; /* raised cards */
+  --p2p-line: #253B56; /* borders, orbit line */
+  --p2p-font-words: "Lexend", system-ui, sans-serif;
+  --p2p-font-code: "JetBrains Mono", ui-monospace, monospace;
+}

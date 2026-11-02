@@ -1,4 +1,14 @@
+<p align="center">
+  <img src="brand/P2PBotKit_Patch_Color.svg" width="240" alt="P2P Bot Kit DEV patch: the Saturn mark over a gear, the kit's bot carrying its own key, and two planets joined by a hash-locked bridge">
+</p>
+
 # Saturn P2P bot kit
+
+<p>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-CDA869?labelColor=0B1626"></a>
+  <img alt="Devnet: test tokens only" src="https://img.shields.io/badge/devnet-test%20tokens%20only-4FD3E3?labelColor=0B1626">
+  <img alt="Node 22 or later" src="https://img.shields.io/badge/node-22%2B-8EA2FF?labelColor=0B1626">
+</p>
 
 A TypeScript kit for running your own maker or taker bot on the Saturn P2P
 board: post offers and keep them listed, accept takes, take offers, and carry
@@ -625,3 +635,5 @@ Saturn's own source, and their line numbers are for reference.
 
 MIT License: see `LICENSE`. The kit is provided as is, without warranty of
 any kind, and you use it at your own risk ("Your keys, your risk" above).
+The logos in `brand/` are the kit's marks and are not covered by the MIT
+License: see `brand/README.md`.
