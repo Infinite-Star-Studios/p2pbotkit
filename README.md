@@ -61,9 +61,8 @@ tokens are test tokens with no value, so nothing here costs or risks money.
 2. **Packages.** `npm ci --ignore-scripts` installs exactly the versions in
    `package-lock.json`, and no package runs an install script. Later starts
    skip this step until the lockfile or the Node version changes. npm may
-   warn that two packages are deprecated: crypto-js, which the Phantasma
-   library uses for SHA-256, and prebuild-install, from that library's Ledger
-   USB support, which the kit does not use. Neither stops the install.
+   warn that one package is deprecated: crypto-js, which the Phantasma
+   library uses for SHA-256. It does not stop the install.
 3. **Keys.** On the first start it makes a key pair for each bot (a
    Phantasma key and a Base key) in `./keys`, files of mode 0600. Only the
    addresses are printed; the keys never leave your machine.
@@ -91,7 +90,7 @@ tokens are test tokens with no value, so nothing here costs or risks money.
 - **Time:** the first start takes a few minutes (the download and the
   install), later starts a few seconds. Expect the first trades a few
   minutes after the test tokens arrive.
-- **Disk space:** about 150 MB for the packages, and about 200 MB more when
+- **Disk space:** about 130 MB for the packages, and about 200 MB more when
   it downloads Node.
 - **No account needed.** An API key is optional ("API keys and limits"
   below).
@@ -146,7 +145,7 @@ tokens are test tokens with no value, so nothing here costs or risks money.
 and `data/` into its folder. To remove everything, stop the bots and delete
 the folder (back up `keys/` first if the addresses hold anything you want to
 keep). npm also keeps a copy of the packages in its cache (`~/.npm`, about
-25 MB), and tsx keeps compiled code in the temporary folder.
+20 MB), and tsx keeps compiled code in the temporary folder.
 
 ### If something goes wrong
 
@@ -244,13 +243,19 @@ running its own install script, which matters on a machine that holds your
 keys.
 
 The kit pins its two direct dependencies exactly, `viem` 2.57.2 and
-`phantasma-sdk-ts` 0.4.0, and runs its TypeScript with `tsx`. The lockfile
+`phantasma-sdk-ts` 0.20.0, and runs its TypeScript with `tsx`. The lockfile
 that ships in the download fixes the version and the integrity hash of every
-package those pull in as well (about 140, among them Ledger USB modules the
-kit never loads; their install scripts would build them, and the kit needs
-none of them). `npm ci` refuses to install when the lockfile and
-`package.json` disagree, and it replaces `node_modules/` on every run; it
-never touches `keys/` or `data/`.
+package those pull in as well (about 40 on one machine). Only two have an
+install script, `tsx`'s `esbuild` and `fsevents` (macOS only), and the kit
+runs without either.
+`test/sdk-vectors.test.ts` holds `phantasma-sdk-ts` to the keys, escrow
+transactions and view scripts of 0.4.0, the version before it, byte for
+byte, and to its readings of a node's answers, so an SDK upgrade cannot
+change what the kit signs or reads unseen. Saturn's repository runs the
+kit's type check and tests on every change to the kit.
+`npm ci` refuses to install when the lockfile and `package.json` disagree,
+and it replaces `node_modules/` on every run; it never touches `keys/` or
+`data/`.
 
 To upgrade, download the new version and its `.sha256`, check it with
 `sha256sum -c` as above, unpack it, and run `npm ci --ignore-scripts` in it

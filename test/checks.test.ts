@@ -817,6 +817,10 @@ describe('D. the seller\'s lock', () => {
   test('21: the open cap cannot be read (a failed read refuses here)', async () => void await one((w) => { w.pha.fail.add('getOpenAmount'); }, 'OPEN_CAP_UNREAD'));
   test('22: the trade\'s fee is above 2%', async () => void await one(() => {}, 'FEE_UNSET', { trade: { feeBps: 250 } }));
   test('23: the escrow\'s bounds for the token are not the table\'s', async () => void await one((w) => { w.pha.bounds.TAZ = { min: 2_000_000_000n, max: w.pha.bounds.TAZ!.max }; }, 'ESCROW_PARAMS'));
+  test('23: new P2P locks are paused on Phantasma (getPaused reads 1)', async () => {
+    const { p } = await one((w) => { w.pha.paused = true; }, 'ESCROW_PARAMS');
+    assert.match(p.text, /paused/);
+  });
   test('24: SaturnSwap\'s fee is above the trade\'s', async () => void await one((w) => { w.base.feeBps = 60; }, 'SELLER_BASE'));
   test('25: this clock is off from Base\'s newest block', async () => void await one((w) => { w.base.skew = 400; }, 'CLOCK_SKEW'));
   test('28: the signing key is not the seller\'s; less than 1.1 SOUL free', async () => {
@@ -984,6 +988,7 @@ describe('E. the buyer\'s lock', () => {
   }, 'HASH_REUSED'));
   test('39: the trade\'s fee is not fixed', async () => void await one(() => {}, 'FEE_NOT_FIXED', { trade: { feeBps: null } }));
   test('40: the lock holds another token than the trade (exact symbol)', async () => void await one((w) => { w.pha.locks.get(H)!.symbol = 'RA'; }, 'SELLER_LOCK'));
+  test('40: a lock of \'taz\' is not TAZ\'s (the symbol is never upper-cased)', async () => void await one((w) => { w.pha.locks.get(H)!.symbol = 'taz'; }, 'SELLER_LOCK'));
   test('41: the signing key is not the buyer\'s', async () => void await one(() => {}, 'BASE_KEY', { address: { base: X_B } }));
   test('42: a USDC lock for (h, me) exists that the kit did not record', async () => void await one((w) => {
     w.base.addSwap(H, { token: USDC, deadline: T0 + 900, feeBps: 50, state: 1, sender: KB, claimer: S_B, amount: USDC_AMT }, w.base.head - 5n, T0 - 10);

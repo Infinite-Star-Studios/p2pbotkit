@@ -7,6 +7,41 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.1.2 (3 November 2026)
+
+Dependencies only: no trade, check or setting changes.
+
+- `phantasma-sdk-ts` 0.4.0 to 0.20.0, its current release. It signs with
+  `tweetnacl` instead of `elliptic`, for which `npm audit` reported a
+  low-severity advisory (GHSA-848j-6mx2-7j84, a flaw in `elliptic`'s ECDSA
+  signing; the kit's Ed25519 signatures were never affected), and it no
+  longer brings the Ledger hardware-wallet modules the kit never used. The
+  lockfile falls from 165 packages to 65, none of them with a known
+  advisory; only `tsx`'s `esbuild` and `fsevents` keep install scripts,
+  which `npm ci --ignore-scripts` skips.
+- The kit signs exactly what it signed before: `test/sdk-vectors.test.ts`
+  holds the new SDK to 0.4.0's keys, escrow transactions and view scripts,
+  byte for byte (`test/fixtures/sdk-vectors.json`), and checks each
+  signature with Node's own Ed25519.
+- Answers from a Phantasma node read exactly as before: the same test
+  replays the devnet node's answers to the kit's reads, recorded with
+  0.4.0, and gets 0.4.0's results. Only answers the escrow never gives the
+  kit (malformed ones, or values of another type) read differently, and the
+  vectors file records each one:
+  - a value of a type the SDK does not decode (a timestamp, bytes), a
+    struct that does not decode, or a read past the end of the answer reads
+    as no answer, where 0.4.0 read the text "unsupported type N" or part of
+    the struct;
+  - a number whose last byte has its top bit set reads as negative, which
+    the kit refuses (a node never sends one for a value of 0 or more: it
+    adds a 00 sign byte, so secrets and hashes of 2^255 or more read as
+    before);
+  - a value whose length or data is missing entirely reads as 0 or empty,
+    where 0.4.0 refused it, exactly as a well-formed 0 or empty value
+    reads, so a node could send the same reading anyway.
+- Saturn's repository now runs the kit's type check and tests on every
+  change to the kit (`.github/workflows/kit.yml` there).
+
 ## 0.1.1 (26 October 2026)
 
 Pins only: no trade, check or setting changes.

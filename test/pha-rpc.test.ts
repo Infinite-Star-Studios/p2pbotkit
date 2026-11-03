@@ -2,8 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { phaRpc, PhaRpcError } from '../src/pha.js';
+import { Address } from 'phantasma-sdk-ts';
+import { phaRpc, PhaRpcError, PhaReader } from '../src/pha.js';
 import { baseClient, BASE_FETCH_OPTIONS } from '../src/base.js';
+import { escrowFor } from '../src/checks.js';
+import { hexToDecimal } from '../src/codec.js';
+import { readVectors } from './fixtures/sdk-vectors.js';
 
 /**
  * The JSON-RPC envelope of the real Phantasma client. A live node answers a
@@ -70,4 +74,67 @@ test('67: the Base client refuses a redirect from its RPC: the chain id read fai
   } finally {
     await pair.close();
   }
+});
+
+// ── What PhaReader reads from a node's answers ──────────────────────────────
+//
+// The escrow reads over a node that answers each invokeRawScript with the next
+// list of VM values, as the live node does (one per call, in `results`), read
+// by the kit's SDK and then by the kit's own readers.
+
+const vm = {
+  len: (n: number) => n.toString(16).padStart(2, '0'),
+  num(n: bigint): string {
+    if (n === 0n) return '030100';
+    let h = n.toString(16);
+    if (h.length % 2) h = '0' + h;
+    let b = Buffer.from(h, 'hex').reverse();
+    if (b[b.length - 1]! & 0x80) b = Buffer.concat([b, Buffer.from([0])]); // the node's 00 sign byte
+    return '03' + vm.len(b.length) + b.toString('hex');
+  },
+  str: (t: string) => '04' + vm.len(Buffer.byteLength(t, 'latin1')) + Buffer.from(t, 'latin1').toString('hex'),
+  bool: (x: boolean) => (x ? '0601' : '0600'),
+  addr(text: string): string {
+    const b = Buffer.from(Address.FromText(text).ToByteArray());
+    return '08' + vm.len(b.length + 1) + vm.len(b.length) + b.toString('hex');
+  }
+};
+
+/** A node that answers the kit's reads, in order, with these lists of VM values. */
+function readsOver(...answers: string[][]): PhaReader {
+  const left = [...answers];
+  const nodeFetch = (async () => {
+    const results = left.shift();
+    if (!results) throw new Error('fake node: a read more than expected');
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: '1', result: { events: [], result: results[0] ?? '', error: '', results, oracles: [] } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  return new PhaReader(phaRpc('devnet', { fetch: nodeFetch }), 'devnet');
+}
+
+const devnet = (() => { const r = escrowFor('devnet'); if (!r.ok) throw new Error('the devnet escrow'); return r.cfg; })();
+const [S, R] = readVectors().keys.map((k) => k.address);
+const H = '0x' + 'ab'.repeat(32);
+const SECRET = '0x' + '12'.repeat(32);
+
+test('PhaReader: a lock\'s symbol keeps its case and loses only its NUL padding; a secret sent as text with a NUL reads the same', async () => {
+  const claimed = (symbol: string, secret: string) => readsOver([vm.num(2n)], [
+    vm.addr(S!), vm.addr(R!), vm.str(symbol), vm.num(10n ** 8n), vm.num(1_795_000_000n), vm.num(1_794_990_000n), secret
+  ]).readLock(devnet, H);
+  const padded = await claimed('TAZ\u0000\u0000', vm.str(hexToDecimal(SECRET) + '\u0000'));
+  assert.deepEqual(padded, { h: H, state: 2, sender: S, recipient: R, symbol: 'TAZ', amount: 10n ** 8n, deadline: 1_795_000_000, created: 1_794_990_000, secret: SECRET });
+  // Never upper-cased: a lock of 'taz' is not TAZ's, so the exact compares of the checks refuse it.
+  const lower = await claimed('taz', vm.num(BigInt(SECRET)));
+  assert.equal(lower.symbol, 'taz');
+  assert.equal(lower.secret, SECRET);
+  // hashSecret's digest, as a number or as text with a NUL.
+  const digest = '0x' + 'cd'.repeat(32);
+  assert.deepEqual(await readsOver([vm.num(BigInt(digest))], [vm.str(hexToDecimal(digest) + '\u0000')]).hashSecrets(devnet, [SECRET, SECRET]), [digest, digest]);
+});
+
+test('PhaReader: getPaused reads paused from the number 1 or the Bool true, and open from 0 or false (check 23)', async () => {
+  const params = (paused: string) => readsOver([paused, vm.num(600n), vm.num(7_200n), vm.num(10n ** 8n), vm.num(10n ** 12n)]).readParams(devnet, 'TAZ');
+  assert.deepEqual(await params(vm.num(1n)), { paused: true, minLock: 600, maxLock: 7_200, minAmount: 10n ** 8n, maxAmount: 10n ** 12n });
+  assert.equal((await params(vm.bool(true))).paused, true);
+  assert.equal((await params(vm.num(0n))).paused, false);
+  assert.equal((await params(vm.bool(false))).paused, false);
 });

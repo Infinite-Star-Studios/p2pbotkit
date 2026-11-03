@@ -54,13 +54,13 @@ const tokenRow = (x: any) => ({
 /** The site's eleven P2PTiming fields. */
 const SITE_TIMING_KEYS = ['phaLock', 'safety', 'revealMin', 'baseLockLead', 'revealAllowance', 'claimMargin', 'claimWatch', 'refundGrace', 'lockSlack', 'baseLockWindow', 'baseLockSignLead'];
 
-test('package.json: exactly viem 2.57.2 and phantasma-sdk-ts 0.4.0; dev tsx ^4.19.2, typescript ^5.6.3, @types/node ^22; the gate scripts', () => {
+test('package.json: exactly viem 2.57.2 and phantasma-sdk-ts 0.20.0; dev tsx ^4.19.2, typescript ^5.6.3, @types/node ^22; the gate scripts', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg.name, 'saturn-p2p-bot-kit');
   assert.equal(pkg.private, true);
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.engines?.node, '>=22');
-  assert.deepEqual(pkg.dependencies, { 'phantasma-sdk-ts': '0.4.0', viem: '2.57.2' }, 'no other runtime package; exact versions');
+  assert.deepEqual(pkg.dependencies, { 'phantasma-sdk-ts': '0.20.0', viem: '2.57.2' }, 'no other runtime package; exact versions');
   assert.deepEqual(Object.keys(pkg.devDependencies).sort(), ['@types/node', 'tsx', 'typescript']);
   assert.equal(pkg.devDependencies.tsx, '^4.19.2');
   assert.equal(pkg.devDependencies.typescript, '^5.6.3');
@@ -68,12 +68,16 @@ test('package.json: exactly viem 2.57.2 and phantasma-sdk-ts 0.4.0; dev tsx ^4.1
   assert.equal(pkg.scripts.test, 'node --import tsx --test test/*.test.ts');
   assert.equal(pkg.scripts.check, 'tsc --noEmit');
   for (const s of ['seller', 'buyer', 'faucet']) assert.match(pkg.scripts[s], /^tsx examples\/[a-z-]+\.ts$/, s);
-  // The repo already runs these exact packages: viem is the site's pin, phantasma-sdk-ts 0.4.0 the backend keeper's.
+  // viem is the site's pin. The backend keeper runs phantasma-sdk-ts 0.4.0, whose keys, escrow transactions and view
+  // scripts test/sdk-vectors.test.ts holds the kit's 0.20.0 to, byte for byte; a keeper on any other version is not covered.
   const site = new URL('../../frontend/package.json', import.meta.url);
   const backend = new URL('../../backend/package.json', import.meta.url);
   // Only beside Saturn's own site and backend (siteHere, backendHere): a clone next to some other frontend/ or backend/ folder skips these.
   if (siteHere && existsSync(site)) assert.equal(JSON.parse(readFileSync(site, 'utf8')).dependencies.viem, '2.57.2', 'the site pins the same viem');
-  if (backendHere && existsSync(backend)) assert.match(JSON.parse(readFileSync(backend, 'utf8')).dependencies['phantasma-sdk-ts'], /^\^?0\.4\.0$/, 'the backend keeper runs phantasma-sdk-ts 0.4.0');
+  if (backendHere && existsSync(backend)) {
+    const keeper = String(JSON.parse(readFileSync(backend, 'utf8')).dependencies['phantasma-sdk-ts']).replace(/^\^/, '');
+    assert.ok(['0.4.0', '0.20.0'].includes(keeper), `the backend keeper runs phantasma-sdk-ts 0.4.0 (the vectors' version) or the kit's 0.20.0, not ${keeper}`);
+  }
 });
 
 test('.gitignore keeps data/, keys/ and node_modules/ out of the repository, and keeps package-lock.json in it', () => {
@@ -92,7 +96,7 @@ test('the repository README names the kit\'s lockfile as tracked and shipped, un
   assert.match(t, /installs exactly the locked packages with `npm ci --ignore-scripts`/);
 });
 
-test('package-lock.json ships with the kit: in step with package.json, viem 2.57.2 and phantasma-sdk-ts 0.4.0 exactly, every package from the npm registry with its hash', () => {
+test('package-lock.json ships with the kit: in step with package.json, viem 2.57.2 and phantasma-sdk-ts 0.20.0 exactly, no elliptic or Ledger modules, every package from the npm registry with its hash', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
   assert.ok(lock.lockfileVersion === 2 || lock.lockfileVersion === 3, `a lockfile npm 7 or later wrote (lockfileVersion ${lock.lockfileVersion})`);
@@ -104,7 +108,7 @@ test('package-lock.json ships with the kit: in step with package.json, viem 2.57
   assert.deepEqual(root.dependencies, pkg.dependencies, 'dependencies');
   assert.deepEqual(root.devDependencies, pkg.devDependencies, 'devDependencies');
   // The two direct dependencies resolve to their exact pins, once, from the npm registry.
-  for (const [name, version] of [['viem', '2.57.2'], ['phantasma-sdk-ts', '0.4.0']] as const) {
+  for (const [name, version] of [['viem', '2.57.2'], ['phantasma-sdk-ts', '0.20.0']] as const) {
     const entry = lock.packages[`node_modules/${name}`];
     assert.ok(entry, `${name} is locked`);
     assert.equal(entry.version, version, `${name} resolves to ${version}`);
@@ -114,6 +118,14 @@ test('package-lock.json ships with the kit: in step with package.json, viem 2.57
     const copies = Object.keys(lock.packages).filter((k) => k.endsWith(`node_modules/${name}`));
     assert.deepEqual(copies, [`node_modules/${name}`], `one copy of ${name}`);
   }
+  // 0.20.0 signs with tweetnacl and has no Ledger support: no elliptic (GHSA-848j-6mx2-7j84) and none of the USB
+  // modules 0.4.0 brought. Only tsx's esbuild and fsevents (tsx's macOS file watcher) have install scripts, which
+  // `npm ci --ignore-scripts` skips; both are development packages.
+  const names = Object.keys(lock.packages).filter(Boolean).map((p) => p.slice(p.lastIndexOf('node_modules/') + 'node_modules/'.length));
+  assert.deepEqual(names.filter((n) => n === 'elliptic' || n.startsWith('@ledgerhq/') || n === 'node-hid' || n === 'usb'), [], 'no elliptic, no Ledger or USB module');
+  const scripted = Object.entries<any>(lock.packages).filter(([, e]) => e.hasInstallScript);
+  assert.deepEqual(scripted.map(([p]) => p).sort(), ['node_modules/esbuild', 'node_modules/fsevents'], 'the packages with an install script');
+  for (const [p, e] of scripted) assert.equal(e.dev, true, `${p} is a development package`);
   // Every other locked package: fetched from the npm registry only, each with an integrity hash npm checks.
   const bad: string[] = [];
   for (const [path, entry] of Object.entries<any>(lock.packages)) {

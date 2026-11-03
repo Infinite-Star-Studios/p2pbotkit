@@ -1739,7 +1739,7 @@ describe('the documents', () => {
       assert.match(t, /`npm ci(?: --ignore-scripts)?` installs exactly the versions pinned in the\s+kit's `package-lock\.json`/);
       assert.match(t, /install script,\s+which matters on a machine that holds your\s+keys/);
     }
-    assert.match(kit, /`viem` 2\.57\.2 and\s+`phantasma-sdk-ts` 0\.4\.0/);
+    assert.match(kit, /`viem` 2\.57\.2 and\s+`phantasma-sdk-ts` 0\.20\.0/);
     assert.match(kit, /`npm ci` refuses to install when the lockfile and\s+`package\.json` disagree/);
     // Upgrading: download, check the .sha256, npm ci --ignore-scripts, and keys/ and data/ kept outside or copied across.
     const kitUp = /To upgrade,([\s\S]*?)"Upgrading the kit"/.exec(kit)?.[1] ?? '';
@@ -1750,7 +1750,7 @@ describe('the documents', () => {
     assert.ok(exUp.indexOf('sha256sum -c') < exUp.indexOf('tar xzf') && exUp.indexOf('tar xzf') < exUp.indexOf('cp -a saturn-p2p-bot-kit-old') && exUp.indexOf('cp -a saturn-p2p-bot-kit-old') < exUp.indexOf('npm ci --ignore-scripts'),
       'check, unpack, bring keys and data across, then install');
     const pkg = JSON.parse(await readKitFile('package.json')) as { dependencies: Record<string, string> };
-    assert.deepEqual(pkg.dependencies, { 'phantasma-sdk-ts': '0.4.0', viem: '2.57.2' });
+    assert.deepEqual(pkg.dependencies, { 'phantasma-sdk-ts': '0.20.0', viem: '2.57.2' });
     // The quick start says the bots keep running, each in its own terminal, and to fund both.
     assert.match(ex, /each in its own terminal/);
     assert.match(kit, /Fund both bots/);
