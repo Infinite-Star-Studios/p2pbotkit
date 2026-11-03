@@ -1,6 +1,6 @@
 {
   "name": "saturn-p2p-bot-kit",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Saturn P2P bot kit: run your own maker or taker bot against the public P2P board, with your own keys on your own machine.",
   "license": "MIT",
@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "phantasma-sdk-ts": "0.20.0",
-    "viem": "2.57.2"
+    "viem": "2.57.4"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

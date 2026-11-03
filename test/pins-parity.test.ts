@@ -54,13 +54,13 @@ const tokenRow = (x: any) => ({
 /** The site's eleven P2PTiming fields. */
 const SITE_TIMING_KEYS = ['phaLock', 'safety', 'revealMin', 'baseLockLead', 'revealAllowance', 'claimMargin', 'claimWatch', 'refundGrace', 'lockSlack', 'baseLockWindow', 'baseLockSignLead'];
 
-test('package.json: exactly viem 2.57.2 and phantasma-sdk-ts 0.20.0; dev tsx ^4.19.2, typescript ^5.6.3, @types/node ^22; the gate scripts', () => {
+test('package.json: exactly viem 2.57.4 and phantasma-sdk-ts 0.20.0; dev tsx ^4.19.2, typescript ^5.6.3, @types/node ^22; the gate scripts', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg.name, 'saturn-p2p-bot-kit');
   assert.equal(pkg.private, true);
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.engines?.node, '>=22');
-  assert.deepEqual(pkg.dependencies, { 'phantasma-sdk-ts': '0.20.0', viem: '2.57.2' }, 'no other runtime package; exact versions');
+  assert.deepEqual(pkg.dependencies, { 'phantasma-sdk-ts': '0.20.0', viem: '2.57.4' }, 'no other runtime package; exact versions');
   assert.deepEqual(Object.keys(pkg.devDependencies).sort(), ['@types/node', 'tsx', 'typescript']);
   assert.equal(pkg.devDependencies.tsx, '^4.19.2');
   assert.equal(pkg.devDependencies.typescript, '^5.6.3');
@@ -73,7 +73,7 @@ test('package.json: exactly viem 2.57.2 and phantasma-sdk-ts 0.20.0; dev tsx ^4.
   const site = new URL('../../frontend/package.json', import.meta.url);
   const backend = new URL('../../backend/package.json', import.meta.url);
   // Only beside Saturn's own site and backend (siteHere, backendHere): a clone next to some other frontend/ or backend/ folder skips these.
-  if (siteHere && existsSync(site)) assert.equal(JSON.parse(readFileSync(site, 'utf8')).dependencies.viem, '2.57.2', 'the site pins the same viem');
+  if (siteHere && existsSync(site)) assert.equal(JSON.parse(readFileSync(site, 'utf8')).dependencies.viem, '2.57.4', 'the site pins the same viem');
   if (backendHere && existsSync(backend)) {
     const keeper = String(JSON.parse(readFileSync(backend, 'utf8')).dependencies['phantasma-sdk-ts']).replace(/^\^/, '');
     assert.ok(['0.4.0', '0.20.0'].includes(keeper), `the backend keeper runs phantasma-sdk-ts 0.4.0 (the vectors' version) or the kit's 0.20.0, not ${keeper}`);
@@ -96,7 +96,7 @@ test('the repository README names the kit\'s lockfile as tracked and shipped, un
   assert.match(t, /installs exactly the locked packages with `npm ci --ignore-scripts`/);
 });
 
-test('package-lock.json ships with the kit: in step with package.json, viem 2.57.2 and phantasma-sdk-ts 0.20.0 exactly, no elliptic or Ledger modules, every package from the npm registry with its hash', () => {
+test('package-lock.json ships with the kit: in step with package.json, viem 2.57.4 and phantasma-sdk-ts 0.20.0 exactly, no elliptic or Ledger modules, every package from the npm registry with its hash', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
   assert.ok(lock.lockfileVersion === 2 || lock.lockfileVersion === 3, `a lockfile npm 7 or later wrote (lockfileVersion ${lock.lockfileVersion})`);
@@ -108,7 +108,7 @@ test('package-lock.json ships with the kit: in step with package.json, viem 2.57
   assert.deepEqual(root.dependencies, pkg.dependencies, 'dependencies');
   assert.deepEqual(root.devDependencies, pkg.devDependencies, 'devDependencies');
   // The two direct dependencies resolve to their exact pins, once, from the npm registry.
-  for (const [name, version] of [['viem', '2.57.2'], ['phantasma-sdk-ts', '0.20.0']] as const) {
+  for (const [name, version] of [['viem', '2.57.4'], ['phantasma-sdk-ts', '0.20.0']] as const) {
     const entry = lock.packages[`node_modules/${name}`];
     assert.ok(entry, `${name} is locked`);
     assert.equal(entry.version, version, `${name} resolves to ${version}`);

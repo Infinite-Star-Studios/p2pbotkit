@@ -7,6 +7,17 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.1.3 (3 November 2026)
+
+Dependencies only: no trade, check or setting changes.
+
+- `viem` 2.57.2 to 2.57.4, the version Saturn's backend and P2P service
+  already run, and the site from this release on, so every part of Saturn
+  builds its Base transactions with the same library. Its `ox` moves from
+  0.14.45 to 0.14.54 with it; no other package changes. Both are the very
+  packages the backend and the P2P service install (the same integrity
+  hashes), and neither has a known advisory.
+
 ## 0.1.2 (3 November 2026)
 
 Dependencies only: no trade, check or setting changes.

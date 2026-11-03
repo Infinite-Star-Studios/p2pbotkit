@@ -242,7 +242,7 @@ kit's `package-lock.json`, and `--ignore-scripts` stops every package from
 running its own install script, which matters on a machine that holds your
 keys.
 
-The kit pins its two direct dependencies exactly, `viem` 2.57.2 and
+The kit pins its two direct dependencies exactly, `viem` 2.57.4 and
 `phantasma-sdk-ts` 0.20.0, and runs its TypeScript with `tsx`. The lockfile
 that ships in the download fixes the version and the integrity hash of every
 package those pull in as well (about 40 on one machine). Only two have an
