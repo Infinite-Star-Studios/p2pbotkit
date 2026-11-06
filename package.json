@@ -1,6 +1,6 @@
 {
   "name": "saturn-p2p-bot-kit",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "private": true,
   "description": "Saturn P2P bot kit: run your own maker or taker bot against the public P2P board, with your own keys on your own machine.",
   "license": "MIT",
@@ -13,6 +13,7 @@
     "check": "tsc --noEmit",
     "seller": "tsx examples/seller-bot.ts",
     "buyer": "tsx examples/buyer-bot.ts",
+    "market": "tsx examples/market-bot.ts",
     "faucet": "tsx examples/faucet.ts"
   },
   "dependencies": {

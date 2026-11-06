@@ -1,0 +1,15 @@
+{
+  "network": "mainnet",
+  "api": "https://apiops.saturnx.cc",
+  "apiKeyFile": null,
+  "keys": { "pha": "./keys/mainnet/market-pha.json", "base": "./keys/mainnet/market-base.json" },
+  "dataDir": "./data/market",
+  "offers": [],
+  "bids": [],
+  "take": [],
+  "acceptOnTheirOwn": true,
+  "acceptAfterS": null,
+  "claimWatchS": null,
+  "claimMode": "self",
+  "usePermit": true
+}

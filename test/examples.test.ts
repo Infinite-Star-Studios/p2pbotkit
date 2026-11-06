@@ -50,7 +50,7 @@ import type { PhaRpc, PhaCall, PhaBalance, PhaTxState } from '../src/pha.js';
 import { loadKeys } from '../src/keys.js';
 import { openStore } from '../src/store.js';
 import type { Offer, Trade } from '../src/types.js';
-import { runBot, parseBotConfig, kitOptions, botPolicy, networkGate, readOnlyTransports, defaultConfigPath, referenceLines, sameOffer, describeOffer, type BotKit, type Role } from '../examples/seller-bot.js';
+import { runBot, parseBotConfig, kitOptions, botPolicy, networkGate, readOnlyTransports, defaultConfigPath, referenceLines, sameOffer, describeOffer, MARKET_CONFIG, type BotKit, type Role } from '../examples/seller-bot.js';
 import { main as newKeysMain, makeKeyPairs } from '../examples/new-keys.js';
 import { main as faucetMain } from '../examples/faucet.js';
 import { main as pruneMain, pruneSecrets, KEEP_DAYS, type PruneChains } from '../examples/prune.js';
@@ -1319,6 +1319,87 @@ describe('mainnet is refused', () => {
     assert.equal(await faucetMain({ argv: ['--network', 'mainnet', '--pha', newPha()], fetch: w.board.fetch as typeof fetch, out: out.out }), 2);
     assert.match(out.lines.join('\n'), /devnet only/);
     assert.equal(w.board.calls.length, 0);
+  });
+});
+
+describe('the market bot (market-bot.ts): your own config, ./market.mainnet.json unless --config names another', () => {
+  const never = () => async (): Promise<BotKit> => { throw new Error('never'); };
+
+  test('its template, which sh start.sh mainnet copies, is for mainnet and lists nothing: no offer, bid or order until you add yours', async () => {
+    const cfg = parseBotConfig(JSON.parse(await readKitFile('examples/market.mainnet.example.json')));
+    assert.equal(cfg.network, 'mainnet');
+    assert.deepEqual(cfg.offers, [], 'no offer or bid: the bot lists nothing at the start');
+    assert.deepEqual(cfg.take, [], 'no recurring order: the bot takes nothing at the start');
+    assert.equal(cfg.dataDir, './data/market');
+    assert.equal(cfg.acceptOnTheirOwn, true);
+    assert.equal(cfg.acceptAfterS, null, 'the kit\'s accept delay (15 s), so a take can still be declined');
+    assert.equal(cfg.claimWatchS, null, 'the network\'s claim watch');
+    assert.equal(cfg.claimMode, 'self');
+    // Its key files are the pair new-keys.ts makes with --dir keys/mainnet --name market (start.sh's command).
+    assert.deepEqual(cfg.keys, { pha: './keys/mainnet/market-pha.json', base: './keys/mainnet/market-base.json' });
+    const d = await tempDir();
+    const [pair] = await makeKeyPairs(join(d, 'keys', 'mainnet'), ['market']);
+    assert.equal(pair!.phaFile, join(d, cfg.keys.pha));
+    assert.equal(pair!.baseFile, join(d, cfg.keys.base));
+  });
+
+  test('without --config it reads market.mainnet.json in its folder; a missing one says how to make it, and the kit is never built', async () => {
+    const d = await tempDir();
+    const out = sink();
+    const code = await runBot({ role: 'market', argv: ['--mainnet'], cwd: d, env: { KIT_ALLOW_MAINNET: '1' }, out: out.out, signals: new EventEmitter(), makeKit: never() });
+    assert.equal(code, 1);
+    const text = out.lines.join('\n');
+    assert.ok(text.includes(`The config ${join(d, MARKET_CONFIG)} cannot be used`), text);
+    assert.match(text, /\[market\] The config/, 'its lines say [market]');
+    assert.match(text, /Make it with: sh start\.sh mainnet setup \(or copy examples\/market\.mainnet\.example\.json to market\.mainnet\.json\)/);
+  });
+
+  test('its mainnet config needs --mainnet and KIT_ALLOW_MAINNET=1 like any other; with both, the kit is built with the config\'s paths from its folder', async () => {
+    const d = await tempDir();
+    await writeFile(join(d, MARKET_CONFIG), await readKitFile('examples/market.mainnet.example.json'));
+    for (const c of [
+      { argv: [], env: { KIT_ALLOW_MAINNET: '1' }, re: /only with --mainnet and KIT_ALLOW_MAINNET=1/ },
+      { argv: ['--mainnet'], env: {}, re: /--mainnet also needs KIT_ALLOW_MAINNET=1/ }
+    ]) {
+      const out = sink();
+      let built = 0;
+      const code = await runBot({ role: 'market', argv: c.argv, cwd: d, env: c.env, out: out.out, signals: new EventEmitter(), makeKit: async () => { built++; throw new Error('never'); } });
+      assert.equal(code, 1, out.lines.join('\n'));
+      assert.equal(built, 0, 'refused before the kit is built');
+      assert.match(out.lines.join('\n'), c.re);
+    }
+    const out = sink();
+    const built: KitOptions[] = [];
+    const code = await runBot({
+      role: 'market', argv: ['--mainnet'], cwd: d, env: { KIT_ALLOW_MAINNET: '1' }, out: out.out, signals: new EventEmitter(),
+      makeKit: async (o) => { built.push(o); throw new SafetyError(SAFETY.KEY_FILE, `The key file ${o.phaKeyFile} cannot be opened (ENOENT).`); }
+    });
+    assert.equal(code, 1);
+    assert.equal(built.length, 1, 'both switches: the kit is built');
+    assert.equal(built[0]!.network, 'mainnet');
+    assert.equal(built[0]!.allowMainnet, true);
+    assert.equal(built[0]!.phaKeyFile, join(d, 'keys/mainnet/market-pha.json'));
+    assert.equal(built[0]!.baseKeyFile, join(d, 'keys/mainnet/market-base.json'));
+    assert.equal(built[0]!.dataDir, join(d, 'data/market'));
+    const text = out.lines.join('\n');
+    assert.match(text, /\[market\] Starting on mainnet with /);
+    // Missing key files: the command that makes the pair its template names.
+    assert.match(text, /Make the key files with: npx tsx examples\/new-keys\.ts --dir keys\/mainnet --name market/);
+  });
+
+  test('its help names its own config and the command that makes its keys; the example bots keep theirs', async () => {
+    const help = async (role: Role) => {
+      const out = sink();
+      assert.equal(await runBot({ role, argv: ['--help'], cwd: await tempDir(), env: {}, out: out.out, signals: new EventEmitter(), makeKit: never() }), 0);
+      return out.lines.join('\n');
+    };
+    const market = await help('market');
+    assert.match(market, /^Usage: npm run market /);
+    assert.match(market, /default \.\/market\.mainnet\.json/);
+    assert.match(market, /new-keys\.ts --dir keys\/mainnet --name market/);
+    const seller = await help('seller');
+    assert.match(seller, /default examples\/seller\.devnet\.example\.json/);
+    assert.doesNotMatch(seller, /market/);
   });
 });
 

@@ -7,6 +7,30 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.2.0 (6 November 2026)
+
+`start.sh` runs on mainnet too, with a market bot of your own. No trade,
+check, pin or setting of the kit changes.
+
+- `sh start.sh` asks where to run: devnet (the two example bots, test
+  tokens; Enter alone picks it) or mainnet (your own market bot, real
+  funds). `sh start.sh devnet` and `sh start.sh mainnet`, `--network`, or
+  `KIT_NETWORK` choose without the question. Without a terminal and without
+  any of them it stays on devnet, as before.
+- On mainnet `start.sh` makes the market bot's own key pair in
+  `keys/mainnet/` and its config `market.mainnet.json` from
+  `examples/market.mainnet.example.json`, which lists no offers, bids or
+  orders: the bot lists and takes nothing until you add yours. It never asks
+  a faucet, shows a dry run first, and starts the bot only once you type yes,
+  or with `KIT_ALLOW_MAINNET=1` already set for a start without a terminal;
+  then it gives `--mainnet` and `KIT_ALLOW_MAINNET=1` to that bot alone.
+- `examples/market-bot.ts` (`npm run market`): the example bots' runner with
+  your own config, `market.mainnet.json` in the kit's folder unless
+  `--config` names another; its lines say `[market]`.
+- The example seller and buyer and the faucet stay devnet's: `start.sh`
+  refuses them on mainnet, where the examples' devnet prices would trade for
+  real.
+
 ## 0.1.4 (6 November 2026)
 
 Pins only: mainnet's escrow and SaturnSwap (P2P/LAUNCH.md step 9). No

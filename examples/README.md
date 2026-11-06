@@ -4,7 +4,9 @@ Two small bots that trade with each other on devnet, built on the kit
 (`../README.md`): a **seller** that keeps sell offers listed and sells into
 bids, and a **buyer** that keeps buy offers listed and buys from asks. Start
 both and they trade in both directions, through the public P2P board, with
-locks and claims on Phantasma devnet and Base Sepolia.
+locks and claims on Phantasma devnet and Base Sepolia. On mainnet a third
+one, the **market bot**, runs alone, with your own config and prices
+("Mainnet" below).
 
 Their trades with each other are real trades, but they never raise a maker's
 accept rate: started on one machine, one network address, each take counts
@@ -298,6 +300,28 @@ with `"network": "mainnet"` in its config, `--mainnet` on its command line and
 to start. It trades only while the board runs P2P on mainnet. Use keys made
 for it and small balances first.
 
+The two example configs stay devnet's: their prices are devnet's own ratio
+("Prices and the devnet ratio" above), and on mainnet a price is a real trade
+at that price. On mainnet, run the market bot (`market-bot.ts`,
+`npm run market`) with a config of your own. `sh start.sh mainnet` sets it
+up:
+
+- the market bot's own key pair in `keys/mainnet/`
+  (`npx tsx examples/new-keys.ts --dir keys/mainnet --name market`);
+- its config, `market.mainnet.json` in the kit's folder, a copy of
+  `market.mainnet.example.json`. It lists no offers, bids or orders, so the
+  bot lists and takes nothing until you add yours, with the keys of "The
+  config" above. One config may hold both `offers` and `bids`, which keeps
+  both sides of a token listed;
+- a dry run, then the bot starts once you type `yes` (or at once, with
+  `KIT_ALLOW_MAINNET=1` already set, for a start without a terminal).
+
+By hand, in the kit's folder:
+`KIT_ALLOW_MAINNET=1 npm run market -- --mainnet --dry-run`, then the same
+without `--dry-run`; `--config <file>` names another config. The market
+bot's lines say `[market]`, and it stops as the example bots do ("Stopping,
+restarting" above).
+
 ## Behind a proxy
 
 Node's built-in `fetch`, which the kit uses for the board and both chains,
@@ -312,6 +336,8 @@ through a proxy.
 | `seller-bot.ts` | The seller bot, and the runner both bots use. |
 | `buyer-bot.ts` | The buyer bot. |
 | `seller.devnet.example.json`, `buyer.devnet.example.json` | Their configs. |
+| `market-bot.ts` | The market bot: the same runner, with your own config (`market.mainnet.json` in the kit's folder unless `--config` names another). |
+| `market.mainnet.example.json` | The template of the market bot's config: mainnet, with no offers, bids or orders until you add yours. |
 | `new-keys.ts` | Makes key pairs (0600 files) and prints their addresses. |
 | `faucet.ts` | Asks the devnet faucet for test tokens. |
 | `prune.ts` | Removes old swap secrets. |

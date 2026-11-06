@@ -1,16 +1,26 @@
 #!/bin/sh
-# Saturn P2P bot kit: try it on devnet with one command.
+# Saturn P2P bot kit: run it with one command, on devnet or on mainnet.
 #
-#   sh start.sh             set up, then run the example seller and buyer bots together
+#   sh start.sh             ask where to run: devnet (test tokens) or mainnet (real funds)
+#   sh start.sh devnet      set up, then run the example seller and buyer bots together
+#   sh start.sh mainnet     set up your market bot, show a dry run, then start it once you type yes
+#
+# On devnet:
 #   sh start.sh seller      set up, then run only the seller bot (more options go to the bot)
 #   sh start.sh buyer       set up, then run only the buyer bot
-#   sh start.sh dry-run     set up, then show what both bots would do; sends nothing
 #   sh start.sh faucet      ask the devnet faucet for test tokens for both bots again
-#   sh start.sh setup       only set up: Node, the packages, the keys, the first test tokens
+# On mainnet:
+#   sh start.sh market      the market bot (more options go to the bot)
+# After the network's name, or alone (then it asks):
+#   sh start.sh dry-run     set up, then show what the bots would do; sends nothing
+#   sh start.sh setup       only set up: Node, the packages, the keys, and the first test
+#                           tokens on devnet or the market bot's config on mainnet
 #   sh start.sh help        this text
 #
-# Devnet only: test tokens, no real money. The keys are made on this machine,
-# stay in ./keys (mode 0600) and are never sent anywhere. README.md says what
+# Devnet is test tokens, no real money; mainnet is real funds, and a bot
+# starts there only once you type yes (or with KIT_ALLOW_MAINNET=1 already
+# set). The keys are made on this machine, stay in ./keys (mainnet's in
+# ./keys/mainnet, mode 0600) and are never sent anywhere. README.md says what
 # each step does.
 #
 # MIT License (LICENSE): the kit comes as is, without warranty of any kind,
@@ -30,23 +40,39 @@ die() {
 
 usage() {
   cat <<'EOF'
-Saturn P2P bot kit, devnet (test tokens only).
+Saturn P2P bot kit, on devnet (test tokens) or mainnet (real funds).
 Use at your own risk: the kit comes as is, without warranty of any kind
 (MIT License, see LICENSE).
 
-  sh start.sh            set up, then run the example seller and buyer bots together
+  sh start.sh            ask where to run: devnet or mainnet (Enter alone picks devnet)
+  sh start.sh devnet     set up, then run the example seller and buyer bots together
+  sh start.sh mainnet    set up your market bot, show a dry run, then start it once you type yes
+
+On devnet:
   sh start.sh seller     set up, then run only the seller bot
   sh start.sh buyer      set up, then run only the buyer bot
-  sh start.sh dry-run    set up, then show what both bots would do; sends nothing
   sh start.sh faucet     ask the devnet faucet for test tokens for both bots again
-  sh start.sh setup      only set up (Node, packages, keys, first test tokens)
+On mainnet:
+  sh start.sh market     the market bot: a dry run first, then it starts once you type yes
+After the network's name, or alone (then it asks):
+  sh start.sh dry-run    set up, then show what the bots would do; sends nothing
+  sh start.sh setup      only set up (Node, packages, keys; on devnet the first test
+                         tokens, on mainnet the market bot's config market.mainnet.json)
   sh start.sh help       this text
 
-Options after "seller" or "buyer" go to that bot (a relative path in them is
-taken from the kit's folder), for example:
+The network's name goes first, for example: sh start.sh mainnet dry-run.
+--network devnet or --network mainnet does the same, and so does KIT_NETWORK
+in the environment. Without a terminal to ask in, and without any of them,
+start.sh runs on devnet.
+
+Options after "seller", "buyer" or "market" go to that bot (a relative path
+in them is taken from the kit's folder), for example:
   sh start.sh seller --config seller.json
   sh start.sh buyer --dry-run
+  sh start.sh market --config my-market.json
 
+On mainnet a bot starts only once you type yes, or with KIT_ALLOW_MAINNET=1
+already set (for a start without a terminal, such as a service).
 Set KIT_SKIP_FAUCET=1 to never ask the faucet on a start, and
 KIT_NO_NODE_DOWNLOAD=1 to never download Node into ./.node.
 EOF
@@ -295,13 +321,18 @@ claim_test_tokens() { # <always|first>
   fi
 }
 
-setup() { # [skip-faucet]
-  say "Saturn P2P bot kit, devnet: test tokens only, no real money. Your keys stay on this machine."
-  say "You use it at your own risk: it comes as is, without warranty of any kind (MIT License, see LICENSE)."
+# Node and the packages, the same on both networks.
+setup_node() {
   find_node
   proxy_setting
   say "Node $("$NODE" --version) at $NODE"
   install_packages
+}
+
+setup() { # [skip-faucet]: devnet's setup
+  say "Saturn P2P bot kit, devnet: test tokens only, no real money. Your keys stay on this machine."
+  say "You use it at your own risk: it comes as is, without warranty of any kind (MIT License, see LICENSE)."
+  setup_node
   make_keys
   if [ "${1:-}" = skip-faucet ]; then
     return
@@ -419,18 +450,250 @@ dry_run_both() {
   return "$rc"
 }
 
+# ── The network: devnet or mainnet ───────────────────────────────────────────
+
+NETWORK=''
+
+set_network() { # <devnet|mainnet> <where it was named>
+  case "$1" in
+    devnet | mainnet) ;;
+    *) die "$2 is devnet or mainnet, not \"$1\"" ;;
+  esac
+  if [ -n "$NETWORK" ] && [ "$NETWORK" != "$1" ]; then
+    die "two networks were named ($NETWORK and $1): name one"
+  fi
+  NETWORK=$1
+}
+
+# A question needs someone to see it and answer it: a terminal on both ends.
+is_interactive() { [ -t 0 ] && [ -t 1 ]; }
+
+# The network, asked in a terminal when no name, --network, KIT_NETWORK or command chose it; devnet without a terminal.
+choose_network() {
+  if [ -n "$NETWORK" ]; then
+    return 0
+  fi
+  if ! is_interactive; then
+    NETWORK=devnet
+    say "Network: devnet, the default without a terminal to ask in (sh start.sh mainnet runs on mainnet)."
+    return 0
+  fi
+  say "Where do you want to run the bot?"
+  say "  1) devnet   the test network: test tokens with no value; the two example bots trade with each other"
+  say "  2) mainnet  real funds: your own market bot, trading at the prices you set"
+  tries=0
+  while :; do
+    printf '%s' 'Type 1 or 2, then Enter (Enter alone picks devnet): '
+    answer=''
+    read -r answer || die "no answer came, so nothing was done"
+    case "$answer" in
+      '' | 1 | devnet | Devnet | DEVNET)
+        NETWORK=devnet
+        return 0
+        ;;
+      2 | mainnet | Mainnet | MAINNET)
+        NETWORK=mainnet
+        return 0
+        ;;
+    esac
+    tries=$((tries + 1))
+    [ "$tries" -lt 3 ] || die "no network was picked, so nothing was done"
+    say "Type 1 for devnet or 2 for mainnet."
+  done
+}
+
+# The example bots and the faucet are devnet's.
+devnet_only() { # <command>
+  if [ "$NETWORK" = mainnet ]; then
+    case "$1" in
+      faucet) die "the faucet serves devnet's test tokens only; mainnet has none. Send the market bot what it should trade (sh start.sh mainnet setup shows its addresses)" ;;
+      *) die "the $1 bot is a devnet example: its config's prices are devnet's own, and on mainnet they would trade for real. On mainnet, run your own market bot: sh start.sh mainnet" ;;
+    esac
+  fi
+  NETWORK=devnet
+}
+
+# ── Mainnet: your own market bot ─────────────────────────────────────────────
+
+# The market bot's config when no --config is given: your own file, kept outside examples/ (each version replaces examples/).
+MARKET_CONFIG=market.mainnet.json
+
+intro_mainnet() {
+  say "Saturn P2P bot kit, mainnet: real funds and real trades. Your keys stay on this machine."
+  say "You use it at your own risk: it comes as is, without warranty of any kind (MIT License, see LICENSE). Nobody can undo a trade for you: start small."
+}
+
+# The market bot's own key pair and its config, made once (never over a file that is there).
+market_setup() {
+  if [ -f "$MARKET_CONFIG" ]; then
+    return 0
+  fi
+  check_private_files
+  say ""
+  say "Making the market bot's own key pair for mainnet (a Phantasma key and a Base key) in ./keys/mainnet, mode 0600."
+  if ! out=$(run_tsx examples/new-keys.ts --dir keys/mainnet --name market); then
+    printf '%s\n' "$out" | grep -v '^  Fund it on devnet: ' || :
+    die "the market bot's key files could not all be made or read (above), so its config was not made"
+  fi
+  # Mainnet has no faucet: leave out new-keys' devnet hint.
+  printf '%s\n' "$out" | grep -v '^  Fund it on devnet: ' || :
+  cp examples/market.mainnet.example.json "$MARKET_CONFIG"
+  say ""
+  say "Mainnet has no faucet: the bot trades only what you send to those two addresses. Send it what it should trade, and start small:"
+  say "  Phantasma: the tokens it sells, at least 1.1 SOUL, and a few KCAL for its sends (each one can cost up to 3 KCAL)."
+  say "  Base: the USDC it buys with, and a little ETH for gas (each transaction at most 0.002 ETH under the kit's fee caps)."
+  say ""
+  say "Wrote $MARKET_CONFIG, the market bot's config. It lists nothing yet, so the bot lists and takes nothing until you add your offers:"
+  say '  "offers" are sell offers and "bids" buy offers: amounts in whole tokens and prices in USDC per whole token, as text, such as'
+  say '  "offers": [{ "symbol": "TAZ", "total": "500", "min": "20", "max": "100", "price": "<your price>" }]'
+  say "  Each trade is at least 1 USDC. examples/README.md (\"The config\") explains every key, and a dry run shows the open offers and the reference price."
+  say "  Do not copy the prices of the devnet examples: they are devnet's own, and on mainnet a price is a real trade at that price."
+}
+
+# True when the config reads as a JSON object that lists no offer, bid or recurring order: the bot would have nothing to do.
+config_lists_nothing() { # <file>
+  "$NODE" -e '
+    let c;
+    try { c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
+    if (!c || typeof c !== "object" || Array.isArray(c)) process.exit(1);
+    const n = (v) => (Array.isArray(v) ? v.length : v == null ? 0 : 1);
+    process.exit(n(c.offers) + n(c.bids) + n(c.take) === 0 ? 0 : 1);
+  ' "$1"
+}
+
+nothing_listed_note() { # <config>
+  if config_lists_nothing "$1"; then
+    say ""
+    say "$1 lists no offers, bids or orders yet, so the market bot has nothing to do. Add yours there (examples/README.md, \"The config\"), then start it again."
+  fi
+}
+
+# What the market bot's options ask for: M_MODE start, dry-run or help; M_CONFIG the --config given ('' for none); M_MAINNET 1 when --mainnet is among them.
+market_scan() {
+  M_MODE=start
+  M_CONFIG=''
+  M_MAINNET=0
+  next=''
+  for a in ${1+"$@"}; do
+    if [ "$next" = config ]; then
+      M_CONFIG=$a
+      next=''
+      continue
+    fi
+    case "$a" in
+      --help | -h) M_MODE=help ;;
+      --dry-run) [ "$M_MODE" = help ] || M_MODE=dry-run ;;
+      --mainnet) M_MAINNET=1 ;;
+      --config) next=config ;;
+      --config=*) M_CONFIG=${a#--config=} ;;
+    esac
+  done
+}
+
+market_main() { # [the market bot's options]
+  market_scan ${1+"$@"}
+  intro_mainnet
+  setup_node
+  if [ "$M_MODE" = help ]; then
+    say ""
+    say "The market bot's own help follows. Through this script, where it says npm run market -- <options>, type sh start.sh market <options>."
+    exec "$NODE" --import tsx examples/market-bot.ts ${1+"$@"}
+  fi
+  cfg=$M_CONFIG
+  if [ -z "$cfg" ]; then
+    market_setup
+    cfg=$MARKET_CONFIG
+    set -- ${1+"$@"} --config "$cfg"
+  fi
+  [ -f "$cfg" ] || die "there is no config $cfg (sh start.sh mainnet setup makes $MARKET_CONFIG)"
+  # The bot's own switch for a mainnet config; KIT_ALLOW_MAINNET=1, its other one, is given below run by run.
+  [ "$M_MAINNET" = 1 ] || set -- "$@" --mainnet
+  if [ "$M_MODE" = dry-run ] || config_lists_nothing "$cfg"; then
+    say ""
+    say "Dry run of the market bot on mainnet: it reads the board and both chains and sends nothing."
+    [ "$M_MODE" = dry-run ] || set -- "$@" --dry-run
+    # Reading mainnet needs both switches too; a dry run's transports refuse every send.
+    rc=0
+    KIT_ALLOW_MAINNET=1 "$NODE" --import tsx examples/market-bot.ts "$@" || rc=$?
+    nothing_listed_note "$cfg"
+    return "$rc"
+  fi
+  if [ "${KIT_ALLOW_MAINNET:-}" = 1 ]; then
+    say ""
+    say "KIT_ALLOW_MAINNET=1 is set, so the market bot starts without a question."
+  elif is_interactive; then
+    say ""
+    say "First a dry run: it reads the board and both chains, shows what the bot would list and take, and sends nothing."
+    if ! KIT_ALLOW_MAINNET=1 "$NODE" --import tsx examples/market-bot.ts "$@" --dry-run; then
+      say ""
+      say "The dry run stopped on a problem (above), so the market bot was not started. Nothing was sent."
+      return 1
+    fi
+    say ""
+    say "That is what the market bot lists and takes on mainnet, with real funds, at the prices in $cfg."
+    printf '%s' 'Start it now? Type yes to start, anything else to stop here: '
+    answer=''
+    read -r answer || :
+    case "$answer" in
+      yes | Yes | YES) ;;
+      *)
+        say "Not started. Nothing was sent."
+        return 0
+        ;;
+    esac
+  else
+    die "on mainnet the market bot starts only once you type yes in a terminal, or with KIT_ALLOW_MAINNET=1 already set (for a start without a terminal). sh start.sh mainnet dry-run shows what it would do"
+  fi
+  say ""
+  say "Starting the market bot on mainnet with $cfg. Its own lines say [market], and the kit's lines about offers, locks, claims and refunds say [kit] with the trade's number."
+  say "Watch it on https://ops.saturnx.cc/p2p, with mainnet picked in the Network menu at the top of the page."
+  say "Press Ctrl-C once to stop it cleanly: it cancels its offers and finishes its running trades, which on mainnet can take up to about 12 hours when the other side never locks. Ctrl-C again stops it at once; the next start resumes every trade."
+  KIT_ALLOW_MAINNET=1
+  export KIT_ALLOW_MAINNET
+  exec "$NODE" --import tsx examples/market-bot.ts "$@"
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
+
+# The network's name first, when given: sh start.sh mainnet ..., or sh start.sh --network mainnet ...
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    devnet | mainnet)
+      set_network "$1" 'The network'
+      shift
+      ;;
+    --network)
+      [ "$#" -ge 2 ] || die "--network is devnet or mainnet"
+      set_network "$2" --network
+      shift 2
+      ;;
+    --network=*)
+      set_network "${1#--network=}" --network
+      shift
+      ;;
+    *) break ;;
+  esac
+done
+if [ -z "$NETWORK" ] && [ -n "${KIT_NETWORK:-}" ]; then
+  set_network "$KIT_NETWORK" KIT_NETWORK
+fi
 
 cmd=${1:-demo}
 if [ "$#" -gt 0 ]; then shift; fi
 
 case "$cmd" in
   demo | start | run)
-    [ "$#" = 0 ] || die "sh start.sh takes no options; options go after seller or buyer (sh start.sh help)"
-    setup
-    run_both
+    [ "$#" = 0 ] || die "sh start.sh takes no options here; options go after seller, buyer or market (sh start.sh help)"
+    choose_network
+    if [ "$NETWORK" = mainnet ]; then
+      market_main
+    else
+      setup
+      run_both
+    fi
     ;;
   seller | buyer)
+    devnet_only "$cmd"
     # A dry run or the bot's help sends nothing, so they never ask the faucet either.
     bot_mode=start
     for a in ${1+"$@"}; do
@@ -448,12 +711,25 @@ case "$cmd" in
     esac
     exec "$NODE" --import tsx "examples/$cmd-bot.ts" ${1+"$@"}
     ;;
+  market)
+    if [ "$NETWORK" = devnet ]; then
+      die "the market bot is start.sh's mainnet bot. On devnet, run the example bots (sh start.sh devnet), or a config of your own with sh start.sh seller --config <file>"
+    fi
+    NETWORK=mainnet
+    market_main ${1+"$@"}
+    ;;
   dry-run | dryrun)
-    setup skip-faucet
-    say "A dry run sends nothing, so no test tokens were asked for. A start without it asks for them, or run: sh start.sh faucet"
-    dry_run_both
+    choose_network
+    if [ "$NETWORK" = mainnet ]; then
+      market_main --dry-run
+    else
+      setup skip-faucet
+      say "A dry run sends nothing, so no test tokens were asked for. A start without it asks for them, or run: sh start.sh faucet"
+      dry_run_both
+    fi
     ;;
   faucet)
+    devnet_only faucet
     find_node
     proxy_setting
     install_packages
@@ -462,9 +738,22 @@ case "$cmd" in
     [ "$SERVED" -gt 0 ]
     ;;
   setup)
-    setup
-    say ""
-    say "Set up. Start both bots with: sh start.sh"
+    choose_network
+    if [ "$NETWORK" = mainnet ]; then
+      intro_mainnet
+      setup_node
+      market_setup
+      say ""
+      if config_lists_nothing "$MARKET_CONFIG"; then
+        say "Set up. Add your offers to $MARKET_CONFIG, then start the market bot with: sh start.sh mainnet"
+      else
+        say "Set up. Start the market bot with: sh start.sh mainnet"
+      fi
+    else
+      setup
+      say ""
+      say "Set up. Start both bots with: sh start.sh devnet"
+    fi
     ;;
   help | -h | --help)
     usage
