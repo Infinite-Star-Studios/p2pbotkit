@@ -41,10 +41,12 @@ git clone https://github.com/Infinite-Star-Studios/p2pbotkit.git && cd p2pbotkit
 No git? On GitHub, click Code, then Download ZIP; unzip it, open a terminal
 in its folder (`p2pbotkit-main`) and run `sh start.sh`.
 
-This runs the two example bots on **devnet**, the test network: a seller and
-a buyer that trade with each other through the public P2P board, with real
-locks, claims and refunds on Phantasma devnet and Base Sepolia. Devnet
-tokens are test tokens with no value, so nothing here costs or risks money.
+`sh start.sh` first asks where to run: **devnet** (press Enter) or
+**mainnet** ("On mainnet" below). On devnet, the test network, it runs the
+two example bots: a seller and a buyer that trade with each other through
+the public P2P board, with real locks, claims and refunds on Phantasma
+devnet and Base Sepolia. Devnet tokens are test tokens with no value, so
+nothing here costs or risks money. `sh start.sh devnet` skips the question.
 
 > **Test tokens:** the bots need test tokens from the devnet faucet before
 > they can trade. If `sh start.sh` says "The faucet is off on this board",
@@ -52,7 +54,7 @@ tokens are test tokens with no value, so nothing here costs or risks money.
 > ask in the Saturn Telegram channel (https://t.me/stellargateio), then run
 > `sh start.sh faucet`.
 
-### What `sh start.sh` does
+### What `sh start.sh` does on devnet
 
 1. **Node.** It uses your Node if it is version 22 or later. If not, it
    downloads Node 22.23.4 from nodejs.org into `./.node`, checks it against
@@ -85,6 +87,40 @@ tokens are test tokens with no value, so nothing here costs or risks money.
 6. **Watch.** Open https://ops.saturnx.cc/p2p, with devnet picked in the
    Network menu at the top of the page, to see the offers and the trades.
 
+### On mainnet
+
+Pick mainnet at the question, or run `sh start.sh mainnet`. Mainnet is real
+funds: nobody can undo a trade for you, so start small. It runs one bot of
+your own, the **market bot** (`examples/market-bot.ts`), which keeps your
+offers listed: sell offers, buy offers, or both.
+
+1. **Node and packages**, as on devnet.
+2. **Keys.** On the first start it makes the market bot's own key pair in
+   `./keys/mainnet` (mode 0600), apart from the devnet bots' keys, and
+   prints its two addresses.
+3. **Your config.** It writes `market.mainnet.json`, a copy of
+   `examples/market.mainnet.example.json` that lists no offers: the bot lists
+   and takes nothing until you add yours there, at your own prices
+   (`examples/README.md`, "The config"). Do not copy the devnet examples'
+   prices: they are devnet's own, and on mainnet a price is a real trade at
+   that price.
+4. **Funds.** Mainnet has no faucet. Send the bot only what it should trade:
+   on Phantasma the tokens it sells, at least 1.1 SOUL and a few KCAL for
+   fees; on Base the USDC it buys with and a little ETH for gas.
+5. **A dry run, then your yes.** Each start shows a dry run first (the
+   balances, the open offers, the reference price, and what the bot would
+   list and take; it sends nothing), then asks you to type `yes`. Only then
+   does it start the bot, with both mainnet switches (`--mainnet` and
+   `KIT_ALLOW_MAINNET=1`) for that bot alone. While the config lists nothing,
+   it stops after the dry run.
+6. **Watch.** Open https://ops.saturnx.cc/p2p, with mainnet picked in the
+   Network menu at the top of the page.
+
+Without a terminal (a service, a script) nothing is asked: `sh start.sh
+mainnet` then starts the bot only with `KIT_ALLOW_MAINNET=1` already set in
+the environment, and without the dry run. `sh start.sh mainnet dry-run`
+sends nothing and needs no answer.
+
 ### Good to know
 
 - **Time:** the first start takes a few minutes (the download and the
@@ -94,9 +130,11 @@ tokens are test tokens with no value, so nothing here costs or risks money.
   it downloads Node.
 - **No account needed.** An API key is optional ("API keys and limits"
   below).
-- **Devnet only.** `start.sh` runs test bots on devnet, with test tokens.
-  Running the kit on mainnet is a separate setup that needs both mainnet
-  switches ("Mainnet needs both switches" below).
+- **Devnet unless you pick mainnet.** Enter alone at the question, and any
+  start without a terminal that names no network, runs the test bots on
+  devnet, with test tokens. Mainnet runs only your own market bot, only once
+  you pick it and type yes ("On mainnet" above), with both mainnet switches
+  ("Mainnet needs both switches" below).
 - **Public trades.** The bots' offers and trades are on the public devnet
   board, where anyone can see and take them.
 - **Windows:** use WSL (the Windows Subsystem for Linux); the kit does not
@@ -108,7 +146,8 @@ tokens are test tokens with no value, so nothing here costs or risks money.
 
 - **Ctrl-C once:** both bots cancel their offers, finish their running
   trades, then exit. A trade half way can take a while (on devnet up to about
-  41 minutes, when the other side never locks).
+  41 minutes, when the other side never locks; for the market bot on
+  mainnet, up to about 12 hours).
 - **Ctrl-C again:** they stop at once. Each bot keeps its state in `./data`,
   and the next start resumes every trade where it was, so start them again
   soon: a stopped bot sends no lock, claim or refund, and a lock it owes and
@@ -122,13 +161,22 @@ tokens are test tokens with no value, so nothing here costs or risks money.
 
 | Command | What it does |
 |---|---|
-| `sh start.sh` | Set up, then run the seller and the buyer bots together. |
-| `sh start.sh seller` | Set up, then run only the seller bot. Options after it go to the bot, for example `sh start.sh seller --config seller.json` (a relative path is taken from the kit's folder); with `--dry-run` or `--help` it asks the faucet for nothing. |
+| `sh start.sh` | Ask where to run, devnet or mainnet, then do what `sh start.sh devnet` or `sh start.sh mainnet` does. |
+| `sh start.sh devnet` | Set up, then run the seller and the buyer bots together on devnet. |
+| `sh start.sh mainnet` | Set up the market bot, show a dry run, then start it on mainnet once you type yes ("On mainnet" above). |
+| `sh start.sh seller` | Devnet: set up, then run only the seller bot. Options after it go to the bot, for example `sh start.sh seller --config seller.json` (a relative path is taken from the kit's folder); with `--dry-run` or `--help` it asks the faucet for nothing. |
 | `sh start.sh buyer` | The same for the buyer bot. |
-| `sh start.sh dry-run` | Set up, then show what both bots would list and take. It sends nothing and asks the faucet for nothing. |
-| `sh start.sh faucet` | Ask the faucet for test tokens for both bots again (each address once a day). |
-| `sh start.sh setup` | Only set up: Node, the packages, the keys and the first test tokens. |
+| `sh start.sh market` | Mainnet: the market bot, as `sh start.sh mainnet` runs it. Options after it go to the bot, for example `sh start.sh market --config my-market.json` or `sh start.sh market --dry-run`. |
+| `sh start.sh dry-run` | Set up, then show what the bots would list and take. It sends nothing and asks the faucet for nothing. |
+| `sh start.sh faucet` | Devnet: ask the faucet for test tokens for both bots again (each address once a day). |
+| `sh start.sh setup` | Only set up: Node, the packages, the keys, and the first test tokens on devnet or the market bot's config on mainnet. |
 | `sh start.sh help` | The list of commands. |
+
+The network's name goes first and skips the question: `sh start.sh mainnet
+dry-run`, `sh start.sh devnet setup`. `--network mainnet` does the same, and
+so does `KIT_NETWORK=mainnet` in the environment; without a terminal and
+without any of them, `start.sh` runs on devnet. `seller`, `buyer` and
+`faucet` are devnet's and `market` is mainnet's, so they need no name.
 
 `KIT_SKIP_FAUCET=1 sh start.sh` never asks the faucet on a start, and
 `KIT_NO_NODE_DOWNLOAD=1` never downloads Node.
@@ -137,14 +185,16 @@ tokens are test tokens with no value, so nothing here costs or risks money.
 
 | Folder | What it holds |
 |---|---|
-| `keys/` | The bots' key files (mode 0600). Whoever can read them can spend what the addresses hold: back them up and never share them. |
+| `keys/` | The bots' key files (mode 0600); the market bot's mainnet pair is in `keys/mainnet/`. Whoever can read them can spend what the addresses hold: back them up and never share them. |
 | `data/` | Each bot's state: its offers and trades, their control tokens and swap secrets (`examples/prune.ts` removes old swap secrets). Keep it while trades run, and back it up with `keys/`. |
+| `market.mainnet.json` | The market bot's config on mainnet, your own: `start.sh` writes it, with no offers, only when it is missing. |
 | `.node/` | The Node that `start.sh` downloaded, if it did. To use it for the `npm` and `npx` commands in this README, first run `export PATH="$PWD/.node/bin:$PATH"` in the kit's folder (once per terminal). |
-| `examples/` | The two bots and their configs (`seller.devnet.example.json`, `buyer.devnet.example.json`). |
+| `examples/` | The bots and their configs (`seller.devnet.example.json`, `buyer.devnet.example.json`, and the market bot's template `market.mainnet.example.json`). |
 
-`git pull` brings a new version of the kit and leaves `keys/`, `data/` and
-`.node/` as they are. With the ZIP, download the new one and move `keys/`
-and `data/` into its folder. To remove everything, stop the bots and delete
+`git pull` brings a new version of the kit and leaves `keys/`, `data/`,
+`market.mainnet.json` and `.node/` as they are. With the ZIP, download the
+new one and move `keys/`, `data/` and `market.mainnet.json` into its folder.
+To remove everything, stop the bots and delete
 the folder (back up `keys/` first if the addresses hold anything you want to
 keep). npm also keeps a copy of the packages in its cache (`~/.npm`, about
 20 MB), and tsx keeps compiled code in the temporary folder.
@@ -220,7 +270,8 @@ terminal) so that they use it. `npm run seller -- <options>` does what
 - **Mainnet needs both switches.** This release pins mainnet's escrow and
   SaturnSwap, but the kit runs there only with `allowMainnet: true` in your
   options and `KIT_ALLOW_MAINNET=1` in the environment, and trades only while
-  the board runs P2P on mainnet. Start small.
+  the board runs P2P on mainnet. `sh start.sh mainnet` gives both to its
+  market bot alone, once you type yes. Start small.
 
 ## Get the kit
 

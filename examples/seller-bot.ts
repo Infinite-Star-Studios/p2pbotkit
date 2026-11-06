@@ -1,6 +1,8 @@
 /**
- * The example seller bot (build spec section 6.7), and the runner both
- * example bots use: buyer-bot.ts runs this same code with its own config.
+ * The example seller bot (build spec section 6.7), and the runner every bot
+ * of the kit uses: buyer-bot.ts runs this same code with its own config, and
+ * market-bot.ts with yours (market.mainnet.json, which sh start.sh mainnet
+ * makes from examples/market.mainnet.example.json).
  *
  *   npm run seller                                 # examples/seller.devnet.example.json
  *   npm run seller -- --config ./my-seller.json    # a config of your own
@@ -65,7 +67,8 @@ import { sleep as realSleep, type SleepFn } from '../src/board.js';
 
 // ── The config ───────────────────────────────────────────────────────────────
 
-export type Role = 'seller' | 'buyer';
+/** seller and buyer: the two example bots, with their devnet configs in examples/; market: your own bot, with your own config. */
+export type Role = 'seller' | 'buyer' | 'market';
 
 /** A recurring order: `side` is the bot's own side (buy: buyUpTo at most `limit`; sell: sellDownTo at least `limit`). */
 export interface TakeOrder {
@@ -276,10 +279,22 @@ export function parseBotConfig(raw: unknown): BotConfig {
   };
 }
 
-/** The example config of a role, next to this file. */
-export function defaultConfigPath(role: Role): string {
+/** The example config of an example bot, next to this file. */
+export function defaultConfigPath(role: Exclude<Role, 'market'>): string {
   return fileURLToPath(new URL(`./${role}.devnet.example.json`, import.meta.url));
 }
+
+/**
+ * The market bot's config when --config names none: market.mainnet.json in
+ * the folder the bot runs in (the kit's folder under npm run and start.sh).
+ * It is your own file, outside examples/, whose files every version
+ * replaces. sh start.sh mainnet makes it from
+ * examples/market.mainnet.example.json, which lists no offer, bid or order.
+ */
+export const MARKET_CONFIG = 'market.mainnet.json';
+
+/** The command that makes the key files examples/market.mainnet.example.json names. */
+const MARKET_KEYS_COMMAND = 'npx tsx examples/new-keys.ts --dir keys/mainnet --name market';
 
 /** Whether this kit release pins mainnet's escrow and SaturnSwap (this release: yes; a release without them refuses mainnet). */
 const MAINNET_PINNED = phaPinned(P2P_CONFIG.mainnet) && baseDeployed(P2P_CONFIG.mainnet);
@@ -412,10 +427,12 @@ const WARN_ONLY: ReadonlySet<string> = new Set(['phantasma balance', 'base balan
 
 const usage = (role: Role) => [
   `Usage: npm run ${role} [-- --config <file>] [--dry-run] [--mainnet]`,
-  `  --config <file>  the bot's config (default examples/${role}.devnet.example.json); relative paths in it resolve against the current folder`,
+  role === 'market'
+    ? `  --config <file>  the bot's config (default ./${MARKET_CONFIG}, your own: sh start.sh mainnet makes it from examples/market.mainnet.example.json); relative paths in it resolve against the current folder`
+    : `  --config <file>  the bot's config (default examples/${role}.devnet.example.json); relative paths in it resolve against the current folder`,
   '  --dry-run        start, run the preflight and read the board, print what it would list and take, and send nothing',
   `  --mainnet        allow a mainnet config (also needs KIT_ALLOW_MAINNET=1 and a kit release with mainnet pins${MAINNET_PINNED ? '' : '; this release has none'})`,
-  'Keys are never given on the command line: the config names their 0600 files (make them with npx tsx examples/new-keys.ts).'
+  `Keys are never given on the command line: the config names their 0600 files (make them with ${role === 'market' ? MARKET_KEYS_COMMAND : 'npx tsx examples/new-keys.ts'}).`
 ].join('\n');
 
 /** A refusal or failure as one line: a SafetyError's code and sentence, a board error's code (redacted). */
@@ -521,12 +538,14 @@ export async function runBot(o: RunBotOptions): Promise<number> {
     write(usage(role));
     return 0;
   }
-  const configPath = flags.config ? resolve(cwd, flags.config) : defaultConfigPath(role);
+  const configPath = flags.config ? resolve(cwd, flags.config) : role === 'market' ? resolve(cwd, MARKET_CONFIG) : defaultConfigPath(role);
   let cfg: BotConfig;
   try {
     cfg = parseBotConfig(JSON.parse(await readFile(configPath, 'utf8')));
   } catch (e) {
-    say(`The config ${configPath} cannot be used: ${e instanceof SafetyError ? e.detail : errorText(e)}`);
+    const noMarketConfig = role === 'market' && !flags.config && (e as { code?: unknown } | null)?.code === 'ENOENT';
+    const hint = noMarketConfig ? `. Make it with: sh start.sh mainnet setup (or copy examples/market.mainnet.example.json to ${MARKET_CONFIG}), then add your offers.` : '';
+    say(`The config ${configPath} cannot be used: ${e instanceof SafetyError ? e.detail : errorText(e)}${hint}`);
     return 1;
   }
   const mainnet = flags.mainnet === true;
@@ -549,7 +568,7 @@ export async function runBot(o: RunBotOptions): Promise<number> {
     kit = await (o.makeKit ?? createKit)(kitOptions(cfg, { cwd, mainnet, env, log: kitLog, internals: guard ? guard.internals : o.internals }));
   } catch (e) {
     const missing = e instanceof SafetyError && e.code === 'KEY_FILE' && /cannot be opened \(ENOENT\)/.test(e.detail);
-    say(`The bot did not start: ${explain(e)}${missing ? ' Make the key files with: npx tsx examples/new-keys.ts' : ''}`);
+    say(`The bot did not start: ${explain(e)}${missing ? ` Make the key files with: ${role === 'market' ? MARKET_KEYS_COMMAND : 'npx tsx examples/new-keys.ts'}` : ''}`);
     return 1;
   }
   try {
