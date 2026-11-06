@@ -99,7 +99,7 @@ before anything is read or sent.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `network` | (required) | `"devnet"`. `"mainnet"` is refused in this release (see "Mainnet"). |
+| `network` | (required) | `"devnet"` or `"mainnet"` (mainnet also needs `--mainnet` and `KIT_ALLOW_MAINNET=1`, see "Mainnet"). |
 | `api` | `https://apiops.saturnx.cc` | The board. |
 | `apiKeyFile` | `null` | A file holding an API key (mode 0600). Optional on devnet. |
 | `keys` | (required) | `{"pha": "<file>", "base": "<file>"}`: the two key files, mode 0600. |
@@ -292,10 +292,11 @@ while (!stop.signal.aborted) {
 
 ## Mainnet
 
-Mainnet is off in this release: the kit has no mainnet pins, so both bots
-refuse a mainnet config. When a release with mainnet pins comes, a bot will
-also need both `--mainnet` on its command line and `KIT_ALLOW_MAINNET=1` in
-its environment.
+This release pins mainnet's escrow and SaturnSwap. A bot runs on mainnet only
+with `"network": "mainnet"` in its config, `--mainnet` on its command line and
+`KIT_ALLOW_MAINNET=1` in its environment; without any one of them it refuses
+to start. It trades only while the board runs P2P on mainnet. Use keys made
+for it and small balances first.
 
 ## Behind a proxy
 

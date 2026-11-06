@@ -245,7 +245,7 @@ export class Signer {
     const network = d.keys?.network;
     const cfg = network === 'devnet' || network === 'mainnet' ? P2P_CONFIG[network] : null;
     if (!cfg) throw new SafetyError(SAFETY.NETWORK_OFF, 'The keys are for no network this kit knows.');
-    // Mainnet's pins are empty in this release: nothing is ever signed there (section 7, invariant 12).
+    // A network whose pins are empty in this release gets no signer: nothing is ever signed there (section 7, invariant 12).
     if (!phaPinned(cfg) || !baseDeployed(cfg)) throw new SafetyError(SAFETY.NETWORK_OFF, `This kit release has no pins for ${network}, so it signs nothing there.`);
     this.network = network;
     this.#cfg = cfg;
@@ -816,7 +816,7 @@ function txKey(kind: IntentKind): keyof TradeTxs {
 
 /**
  * The signer for one bot's keys. Refuses (NETWORK_OFF) a network this kit
- * release has no pins for, so nothing is ever signed on mainnet today.
+ * release has no pins for, so nothing is ever signed on such a network.
  */
 export function createSigner(d: SignerDeps): Signer {
   return new Signer(d);

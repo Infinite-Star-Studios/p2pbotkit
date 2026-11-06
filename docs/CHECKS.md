@@ -37,7 +37,7 @@ runs it; the **Code** it refuses with (`CHECK_CODES`, `FLOW_CODES` and
 | # | What | Why | Site source | Kit function | Code |
 |---|---|---|---|---|---|
 | 1 | A token's decimals and per-lock bounds come only from the kit's own token table, and the symbol must match it exactly. | A board, an offer or a feed that rescaled a token could make the bot sign ten times the amount its operator set. | `constants.js:58-63`, `tokenOf` 77-80 | `pins.tokenOf`, `checks.checkToken` | `TOKEN_NOT_TRADED` |
-| 2 | The network has both escrow pins: the escrow's code SHA-256 and its admin. | Without pins there is nothing to check the contract against, so the kit does not trade there (mainnet in this release). | `constants.js:362-365` `phaPinned` | `checks.pinned` (`createKit` refuses first: `NETWORK_OFF`) | `NOT_PINNED` |
+| 2 | The network has both escrow pins: the escrow's code SHA-256 and its admin. | Without pins there is nothing to check the contract against, so the kit does not trade there. | `constants.js:362-365` `phaPinned` | `checks.pinned` (`createKit` refuses first: `NETWORK_OFF`) | `NOT_PINNED` |
 | 3 | Read fresh before every lock, reveal, claim and refund: the SHA-256 of the escrow's script equals the pin, and `getAdmin()` equals the pinned admin. | A replaced or upgraded contract, or a new admin, could change the rules after a trade started. | `pha.js:71-104` `codePinProblem` | `checks.codePin` | `CODE_PIN` |
 | 4 | `hashSecret` on the live Phantasma node returns exactly the pinned SHA-256 vectors. Before a USDC lock, a reveal and a first self-claim. | Both chains must hash the secret the same way, or a secret that opens one lock would not open the other. | `pha.js:114-136` `hashVectorProblem`, `constants.js:337-342` | `checks.hashVectors` | `HASH_VECTORS` |
 | 5 | A lock is always read under the escrow name stored in the trade's record; a contract this release does not serve is refused. | Locks made before an escrow upgrade stay on the old contract; reading another one would misjudge them. | `constants.js:380-384`, `actions.js:181, 189-191` `tradeEscrow` | `checks.escrowFor` | `ESCROW_NOT_SERVED` |
@@ -196,7 +196,7 @@ chain id, which is check 67 itself):
 
 | Code | Meaning |
 |---|---|
-| `NETWORK_OFF` | The network has no pins in this release (mainnet), or mainnet was not explicitly allowed (`allowMainnet` and `KIT_ALLOW_MAINNET=1`). |
+| `NETWORK_OFF` | The network has no pins in this release, or mainnet was not explicitly allowed (`allowMainnet` and `KIT_ALLOW_MAINNET=1`). |
 | `KEY_FILE` | A key file is missing, not a regular file, too large, or not the expected JSON (`{"wif": ...}`, `{"privateKey": ...}`). |
 | `KEY_FILE_MODE` | Other users can read or change a key file: `chmod 600` it. |
 | `KEY_ARGV` | A key appears on the command line: keys are read only from their files. |

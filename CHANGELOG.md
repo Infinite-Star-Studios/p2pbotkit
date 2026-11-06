@@ -7,6 +7,22 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.1.4 (6 November 2026)
+
+Pins only: mainnet's escrow and SaturnSwap (P2P/LAUNCH.md step 9). No
+trade, check or setting changes.
+
+- Mainnet's escrow, `saturnescrow`:
+  - code SHA-256 `ca1521581d1632dac9c0579817044e76253977f685c95240343ce76358e4fd99`
+    (the tested build, the same as devnet's);
+  - admin `P2KBH6mEVXiXgaGqUjafg49oviuXvpTLhskWprpzq1BkYph`, the operating admin after
+    the launch hand-off.
+- SaturnSwap on Base: `0x32A77cfC4B3c1F99378Bf5CCcca1531D3A1392A7`, deployed at block
+  53707008.
+- The kit no longer refuses mainnet for want of pins. It still runs there
+  only with `allowMainnet: true` and `KIT_ALLOW_MAINNET=1`, and posts no
+  instant offer there (`INSTANT_NETWORKS` is devnet only).
+
 ## 0.1.3 (3 November 2026)
 
 Dependencies only: no trade, check or setting changes.

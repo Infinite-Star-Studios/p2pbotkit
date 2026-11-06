@@ -242,7 +242,7 @@ export function checkToken(symbol: unknown): Problem | null {
 }
 
 /** The plain words for a network whose escrow is not pinned in this release. */
-export const NOT_PINNED_TEXT = 'P2P trading is not open on this network in this kit release: the Phantasma escrow is not pinned (mainnet stays off until the owner\'s launch steps).';
+export const NOT_PINNED_TEXT = 'P2P trading is not open on this network in this kit release: the Phantasma escrow is not pinned.';
 export const PIN_MISMATCH_TEXT = 'The P2P contract on Phantasma is not the code this kit checks for. Nothing was locked or shared. Wait for a kit update.';
 export const ADMIN_MISMATCH_TEXT = 'The P2P contract on Phantasma has another admin than the one this kit checks for. Nothing was locked or shared. Wait for a kit update.';
 

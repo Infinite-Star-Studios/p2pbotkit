@@ -11,10 +11,10 @@
  * operator never chose. Changing a value here is a kit release, reviewed like
  * a contract change.
  *
- * Mainnet's escrow and SaturnSwap pins are empty in this release, so the kit
- * refuses mainnet (networkProblem); they are filled only after the owner's
- * launch steps. Instant offers (INSTANT, build spec section 3.10) are
- * devnet only in this release (INSTANT_NETWORKS).
+ * Mainnet's escrow and SaturnSwap pins are filled in this release (the owner's
+ * launch steps); the kit still runs on mainnet only with both allowMainnet and
+ * KIT_ALLOW_MAINNET=1 (networkProblem). Instant offers (INSTANT, build spec
+ * section 3.10) are devnet only in this release (INSTANT_NETWORKS).
  */
 import type { Network } from './types.js';
 
@@ -260,8 +260,8 @@ export const P2P_CONFIG: Readonly<Record<Network, Readonly<P2PNetConfig>>> = Obj
     network: 'mainnet' as const,
     phaContract: PHA_CONTRACT,
     // Filled at launch, after the owner's launch steps (P2P/LAUNCH.md step 9). Empty: the kit refuses mainnet.
-    phaCodeSha256: '',
-    phaAdmin: '',
+    phaCodeSha256: 'ca1521581d1632dac9c0579817044e76253977f685c95240343ce76358e4fd99',
+    phaAdmin: 'P2KBH6mEVXiXgaGqUjafg49oviuXvpTLhskWprpzq1BkYph',
     phaDraining: Object.freeze([]),
     phaClaimKcal: 30_000_000_000n,
     pha: Object.freeze({
@@ -276,7 +276,7 @@ export const P2P_CONFIG: Readonly<Record<Network, Readonly<P2PNetConfig>>> = Obj
       chainId: 8453,
       rpcUrl: 'https://mainnet.base.org',
       explorerUrl: 'https://basescan.org',
-      swap: '',
+      swap: '0x32A77cfC4B3c1F99378Bf5CCcca1531D3A1392A7',
       usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       usdcSymbol: 'USDC',
       nativeCurrency: Object.freeze({ name: 'Ether', symbol: 'ETH', decimals: 18 }),
@@ -485,7 +485,7 @@ export function baseDeployed(cfg: Pick<P2PNetConfig, 'base'> | null): boolean {
 /**
  * Why the kit must not run on `network`, or null:
  *   - a network this release does not know;
- *   - the escrow or SaturnSwap pins are empty (mainnet today);
+ *   - the escrow or SaturnSwap pins are empty (each network's until its launch release);
  *   - mainnet without both `allowMainnet: true` and env KIT_ALLOW_MAINNET=1.
  */
 export function networkProblem(network: unknown, o: { allowMainnet?: boolean; env?: Record<string, string | undefined> } = {}): string | null {

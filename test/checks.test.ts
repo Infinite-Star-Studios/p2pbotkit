@@ -631,7 +631,7 @@ describe('every step passes in its clean world, and the signer sends exactly onc
 
 /** Whether this release pins mainnet (the owner fills the pins at launch); its refusals are checked on UNPINNED either way. */
 const MAINNET_PINNED = phaPinned(P2P_CONFIG.mainnet) && baseDeployed(P2P_CONFIG.mainnet);
-/** Mainnet's settings with the escrow and SaturnSwap pins emptied, as this release ships them. */
+/** Mainnet's settings with the escrow and SaturnSwap pins emptied, as a release without mainnet pins ships them. */
 const UNPINNED = Object.freeze({ ...P2P_CONFIG.mainnet, phaCodeSha256: '', phaAdmin: '', base: Object.freeze({ ...P2P_CONFIG.mainnet.base, swap: '' }) });
 
 describe('A. configuration and pins', () => {
@@ -641,7 +641,7 @@ describe('A. configuration and pins', () => {
     assert.equal(checks.checkToken('TAZ'), null);
   });
 
-  test('2: a network without both escrow pins (mainnet in this release)', async () => {
+  test('2: a network without both escrow pins', async () => {
     if (MAINNET_PINNED) assert.equal(checks.pinned('mainnet'), null);
     else isProblem(checks.pinned('mainnet'), 'NOT_PINNED');
     assert.equal(checks.pinned('devnet'), null);
@@ -1435,7 +1435,7 @@ describe('I. every write', () => {
   });
 });
 
-describe('mainnet while its pins are empty (this release)', () => {
+describe('mainnet while its pins are empty (a release before the launch)', () => {
   test('no signer on mainnet, and its checks refuse before any read', { skip: MAINNET_PINNED ? 'this release pins mainnet: an unpinned network\'s refusal is checked on UNPINNED in A.2 and A.6' : false }, async () => {
     const d = await tempDir();
     const phaFile = join(d, 'p.json'), baseFile = join(d, 'b.json');

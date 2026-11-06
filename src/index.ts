@@ -22,7 +22,7 @@
  * an API key the owner flagged instant.
  *
  * createKit refuses before it reads anything when the network is not open in
- * this release (mainnet today), or an RPC is off the network's allowlist
+ * this release (networkProblem), or an RPC is off the network's allowlist
  * (check 67); then it reads the board's /config (display only: its keeper
  * addresses may only add a key refusal, check 68), loads the two key files
  * (mode 0600, never from argv), checks that the Base RPC serves the pinned
@@ -70,7 +70,7 @@ export interface KitOptions {
   usePermit?: boolean;
   /** Receives redacted lines only. */
   log?: (line: string) => void;
-  /** Default false. Mainnet also needs env KIT_ALLOW_MAINNET=1 and a kit release with mainnet pins (none today). */
+  /** Default false. Mainnet also needs env KIT_ALLOW_MAINNET=1 and a kit release with mainnet pins (this release has them). */
   allowMainnet?: boolean;
   /** The environment the kit reads (KIT_ALLOW_MAINNET, KIT_STORE_KEY_FILE). Default process.env. */
   env?: Record<string, string | undefined>;
@@ -195,7 +195,7 @@ function keeperForbid(c: P2PConfig | null): { pha: string[]; base: string[] } {
 export async function createKit(o: KitOptions): Promise<Kit> {
   if (!o || typeof o !== 'object') throw flowError('BAD_INPUT', 'createKit takes an options object.');
   const env = o.env ?? process.env;
-  // Before any read: the network is open in this release (mainnet is refused today), and both RPCs are allowed (check 67).
+  // Before any read: the network is open in this release (mainnet only with both switches), and both RPCs are allowed (check 67).
   const netBad = networkProblem(o.network, { allowMainnet: o.allowMainnet, env });
   if (netBad) throw new SafetyError(SAFETY.NETWORK_OFF, netBad);
   const network = o.network;

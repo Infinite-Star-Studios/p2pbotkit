@@ -5,7 +5,7 @@
  *     or key;
  *   - a failed check means 0 sends, and so does a re-check that fails right
  *     before the signature; the fake transports count every send;
- *   - only checks.ts can make intents; mainnet has no signer today.
+ *   - only checks.ts can make intents; mainnet has a signer only with its pins.
  *
  * The intents come from the Base-only steps (a refund, a deferred payout),
  * so no escrow bytecode is needed here; checks.test.ts covers every step
@@ -344,7 +344,7 @@ describe('who may make intents, and where', () => {
     assert.throws(() => takeIssuer(), (e: unknown) => e instanceof SafetyError && e.code === 'ISSUER_TAKEN');
   });
 
-  test('mainnet has no signer while its pins are empty (this release); keys and store must be of one network', async () => {
+  test('mainnet has a signer only once its pins are filled (this release fills them); keys and store must be of one network', async () => {
     const mk = await makeKeys('mainnet');
     const d = await tempDir();
     const ms = await openStore({ dataDir: d, network: 'mainnet', keyFile: null });

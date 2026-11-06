@@ -11,7 +11,7 @@
  *      that is not decimal text, or an offer outside the kit's token table
  *      stops it before anything is read or sent);
  *   2. refuses mainnet unless --mainnet and KIT_ALLOW_MAINNET=1 are both
- *      given AND the kit release has mainnet pins (this release has none);
+ *      given AND the kit release has mainnet pins (this release has them);
  *   3. createKit (the 0600 key files, the RPC allowlist, the pinned chain,
  *      the crash-safe store) and preflight (reads only); it does not start
  *      when a check its trading depends on fails;
@@ -281,13 +281,13 @@ export function defaultConfigPath(role: Role): string {
   return fileURLToPath(new URL(`./${role}.devnet.example.json`, import.meta.url));
 }
 
-/** Whether this kit release pins mainnet's escrow and SaturnSwap (this release: no, so mainnet is refused). */
+/** Whether this kit release pins mainnet's escrow and SaturnSwap (this release: yes; a release without them refuses mainnet). */
 const MAINNET_PINNED = phaPinned(P2P_CONFIG.mainnet) && baseDeployed(P2P_CONFIG.mainnet);
 
 /**
  * Why this config may not run now, or null. Mainnet needs all three: the
  * --mainnet flag, KIT_ALLOW_MAINNET=1, and a kit release with mainnet pins
- * (this release has none, so mainnet is refused today).
+ * (this release has them).
  */
 export function networkGate(cfg: Pick<BotConfig, 'network'>, o: { mainnet: boolean; env: Record<string, string | undefined> }): string | null {
   if (cfg.network === 'mainnet' && !o.mainnet) {

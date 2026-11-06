@@ -94,7 +94,9 @@ tokens are test tokens with no value, so nothing here costs or risks money.
   it downloads Node.
 - **No account needed.** An API key is optional ("API keys and limits"
   below).
-- **Devnet only.** Mainnet is off in this release, and the kit refuses it.
+- **Devnet only.** `start.sh` runs test bots on devnet, with test tokens.
+  Running the kit on mainnet is a separate setup that needs both mainnet
+  switches ("Mainnet needs both switches" below).
 - **Public trades.** The bots' offers and trades are on the public devnet
   board, where anyone can see and take them.
 - **Windows:** use WSL (the Windows Subsystem for Linux); the kit does not
@@ -215,9 +217,10 @@ terminal) so that they use it. `npm run seller -- <options>` does what
   give it. A wrong price in your config is a real trade at that price.
 - **Use keys made for the bot.** A key that is also an admin, owner or keeper
   key is refused at start.
-- **Mainnet is off in this release.** The kit has no mainnet pins yet, so it
-  refuses mainnet. When it is turned on, it will also need `allowMainnet: true`
-  in your options and `KIT_ALLOW_MAINNET=1` in the environment.
+- **Mainnet needs both switches.** This release pins mainnet's escrow and
+  SaturnSwap, but the kit runs there only with `allowMainnet: true` in your
+  options and `KIT_ALLOW_MAINNET=1` in the environment, and trades only while
+  the board runs P2P on mainnet. Start small.
 
 ## Get the kit
 
@@ -364,7 +367,7 @@ as `run()` does, so an offer or a take whose answer was lost is still found.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `network` | (required) | `'devnet'` or `'mainnet'` (refused in this release). |
+| `network` | (required) | `'devnet'` or `'mainnet'` (mainnet also needs `allowMainnet: true` and `KIT_ALLOW_MAINNET=1`). |
 | `phaKeyFile`, `baseKeyFile` | (required) | The two key files, mode 0600. |
 | `dataDir` | (required) | The bot's state. One running bot per folder and network. |
 | `api` | `https://apiops.saturnx.cc` | The board. |
