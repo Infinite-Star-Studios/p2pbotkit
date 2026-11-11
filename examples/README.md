@@ -48,7 +48,10 @@ npm run buyer
    `npm ci --ignore-scripts` installs exactly the versions pinned in the
    kit's `package-lock.json` and lets no package run its own install script,
    which matters on a machine that holds your keys; `../README.md` ("Get the
-   kit") says what gets installed.
+   kit") says what gets installed. The site's file is still the kit's
+   version 0.1.4: it has the two example bots, but not the market bot of
+   "Mainnet" below, which comes only with the kit's repository
+   (`../README.md`, "Get the kit").
 2. **Make keys.** `new-keys.ts` writes a key pair for each bot into `keys/`
    (`seller-pha.json`, `seller-base.json`, `buyer-pha.json`,
    `buyer-base.json`), each file mode 0600, and prints only the addresses. It
@@ -313,8 +316,9 @@ up:
   bot lists and takes nothing until you add yours, with the keys of "The
   config" above. One config may hold both `offers` and `bids`, which keeps
   both sides of a token listed;
-- a dry run, then the bot starts once you type `yes` (or at once, with
-  `KIT_ALLOW_MAINNET=1` already set, for a start without a terminal).
+- a dry run, then the bot starts once you type `yes`; in a terminal it
+  always asks. Only a start without a terminal (a service) starts it at
+  once, and only with `KIT_ALLOW_MAINNET=1` already set.
 
 By hand, in the kit's folder:
 `KIT_ALLOW_MAINNET=1 npm run market -- --mainnet --dry-run`, then the same

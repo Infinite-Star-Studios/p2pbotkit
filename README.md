@@ -111,19 +111,23 @@ offers listed: sell offers, buy offers, or both.
 4. **Funds.** Mainnet has no faucet. Send the bot only what it should trade:
    on Phantasma the tokens it sells, at least 1.1 SOUL and a few KCAL for
    fees; on Base the USDC it buys with and a little ETH for gas.
-5. **A dry run, then your yes.** Each start shows a dry run first (the
-   balances, the open offers, the reference price, and what the bot would
-   list and take; it sends nothing), then asks you to type `yes`. Only then
-   does it start the bot, with both mainnet switches (`--mainnet` and
-   `KIT_ALLOW_MAINNET=1`) for that bot alone. While the config lists nothing,
-   it stops after the dry run.
+5. **A dry run, then your yes.** Each start in a terminal shows a dry run
+   first (the balances, the open offers, the reference price, and what the
+   bot would list and take; it sends nothing), then asks you to type `yes`,
+   even with `KIT_ALLOW_MAINNET=1` set. Only then does it start the bot, with
+   both mainnet switches (`--mainnet` and `KIT_ALLOW_MAINNET=1`) for that bot
+   alone. While the config lists nothing, it stops after the dry run, unless
+   the bot's saved state still holds open offers or unfinished trades: then
+   the start goes on (the dry run, then your yes), and the bot cancels those
+   offers and finishes those trades.
 6. **Watch.** Open https://ops.saturnx.cc/p2p, with mainnet picked in the
    Network menu at the top of the page.
 
-Without a terminal (a service, a script) nothing is asked: `sh start.sh
+Without a terminal (a service, a script) nothing can be asked: `sh start.sh
 mainnet` then starts the bot only with `KIT_ALLOW_MAINNET=1` already set in
-the environment, and without the dry run. `sh start.sh mainnet dry-run`
-sends nothing and needs no answer.
+the environment, and without the dry run. In a terminal that variable
+changes nothing: the dry run and the question always come first.
+`sh start.sh mainnet dry-run` sends nothing and needs no answer.
 
 ### Good to know
 
@@ -179,8 +183,11 @@ sends nothing and needs no answer.
 The network's name goes first and skips the question: `sh start.sh mainnet
 dry-run`, `sh start.sh devnet setup`. `--network mainnet` does the same, and
 so does `KIT_NETWORK=mainnet` in the environment; without a terminal and
-without any of them, `start.sh` runs on devnet. `seller`, `buyer` and
-`faucet` are devnet's and `market` is mainnet's, so they need no name.
+without any of them, `start.sh` runs on devnet. In a terminal it asks and
+waits for the answer, so a start that nobody answers (a script run with
+`ssh -t`, a detached tmux or screen session) names the network:
+`sh start.sh devnet`. `seller`, `buyer` and `faucet` are devnet's and
+`market` is mainnet's, so they need no name.
 
 `KIT_SKIP_FAUCET=1 sh start.sh` never asks the faucet on a start, and
 `KIT_NO_NODE_DOWNLOAD=1` never downloads Node.
@@ -279,10 +286,12 @@ terminal) so that they use it. `npm run seller -- <options>` does what
 
 ## Get the kit
 
-This repository holds the kit and `start.sh`. The same version of the kit is
-also published on the Saturn site as one file, together with its SHA-256.
-That file predates this repository: it has no `start.sh` and no `LICENSE`
-file, and its README has none of the notices above. To fetch and check it:
+This repository holds the kit and `start.sh`. The Saturn site also publishes
+the kit as one file, together with its SHA-256, but that file is an older
+version, 0.1.4: it has no `start.sh`, no market bot (`examples/market-bot.ts`,
+`npm run market`) and no `LICENSE` file, and its README has none of the
+notices above. For mainnet and the market bot, use this repository. To fetch
+and check the site's file:
 
 ```
 curl -fsSLO https://ops.saturnx.cc/downloads/saturn-p2p-bot-kit.tgz
@@ -689,10 +698,12 @@ No test sends a transaction: the chains and the board are fakes that count
 every send.
 
 Some tests compare the kit with Saturn's own site, backend and P2P service,
-and run only inside Saturn's source tree: here they are skipped (13 of
+and run only inside Saturn's source tree: here they are skipped (16 of
 them), each with its reason. The same goes for "the site source", "SPEC"
 and "build spec" in `docs/CHECKS.md` and in the code's comments: they name
-Saturn's own source, and their line numbers are for reference.
+Saturn's own source, and their line numbers are for reference. One more test
+runs only in a release that does not pin mainnet, so this release skips it
+too (17 in all).
 
 ## License
 

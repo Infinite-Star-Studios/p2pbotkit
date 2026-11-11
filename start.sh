@@ -18,10 +18,10 @@
 #   sh start.sh help        this text
 #
 # Devnet is test tokens, no real money; mainnet is real funds, and a bot
-# starts there only once you type yes (or with KIT_ALLOW_MAINNET=1 already
-# set). The keys are made on this machine, stay in ./keys (mainnet's in
-# ./keys/mainnet, mode 0600) and are never sent anywhere. README.md says what
-# each step does.
+# starts there only once you type yes (without a terminal: with
+# KIT_ALLOW_MAINNET=1 already set). The keys are made on this machine, stay
+# in ./keys (mainnet's in ./keys/mainnet, mode 0600) and are never sent
+# anywhere. README.md says what each step does.
 #
 # MIT License (LICENSE): the kit comes as is, without warranty of any kind,
 # and you use it at your own risk.
@@ -73,8 +73,9 @@ in them is taken from the kit's folder), for example:
   sh start.sh buyer --dry-run
   sh start.sh market --config my-market.json
 
-On mainnet a bot starts only once you type yes, or with KIT_ALLOW_MAINNET=1
-already set (for a start without a terminal, such as a service).
+On mainnet a bot starts only once you type yes, which a terminal always asks
+for; only a start without a terminal (a service) takes KIT_ALLOW_MAINNET=1,
+already set, in its place.
 Set KIT_SKIP_FAUCET=1 to never ask the faucet on a start, and
 KIT_NO_NODE_DOWNLOAD=1 to never download Node into ./.node.
 EOF
@@ -543,7 +544,7 @@ choose_network() {
 devnet_only() { # <command>
   if [ "$NETWORK" = mainnet ]; then
     case "$1" in
-      faucet) die "the faucet serves devnet's test tokens only; mainnet has none. Send the market bot what it should trade (sh start.sh mainnet setup shows its addresses)" ;;
+      faucet) die "the faucet serves devnet's test tokens only; mainnet has none. Send the market bot what it should trade: its addresses are on the Addresses line of sh start.sh mainnet dry-run" ;;
       *) die "the $1 bot is a devnet example: its config's prices are devnet's own, and on mainnet they would trade for real. On mainnet, run your own market bot: sh start.sh mainnet" ;;
     esac
   fi
@@ -562,7 +563,8 @@ intro_mainnet() {
 
 # The market bot's own key pair and its config, made once (never over a file that is there).
 market_setup() {
-  if [ -f "$MARKET_CONFIG" ]; then
+  if [ -e "$MARKET_CONFIG" ] || [ -L "$MARKET_CONFIG" ]; then
+    [ -f "$MARKET_CONFIG" ] || die "$MARKET_CONFIG is there but is not a file (a folder, or a link to a folder or to nothing): move it away, then run sh start.sh mainnet again"
     return 0
   fi
   check_private_files
@@ -598,10 +600,79 @@ config_lists_nothing() { # <file>
   ' "$1"
 }
 
-nothing_listed_note() { # <config>
+# What the market bot's saved state for mainnet still holds, read the way the bot reads it (the config's dataDir,
+# KIT_STORE_KEY_FILE). Exit 0 with a phrase: its open offers and unfinished trades. Exit 3: nothing to finish (no saved
+# state, or nothing open in it). Any other exit, with the reason when there is one: the state is there but could not be
+# read here (sealed without KIT_STORE_KEY_FILE, or in use by a running bot).
+market_saved_work() { # <config>
+  "$NODE" --import tsx --input-type=module -e '
+    import { readFileSync, existsSync } from "node:fs";
+    import { resolve } from "node:path";
+    import { pathToFileURL } from "node:url";
+    const main = async () => {
+      let dataDir;
+      try { dataDir = JSON.parse(readFileSync(process.argv[1], "utf8")).dataDir; } catch { return 3; }
+      if (typeof dataDir !== "string" || !dataDir || !existsSync(resolve(dataDir, "mainnet"))) return 3;
+      const why = (e) => {
+        const d = e && typeof e.detail === "string" ? e.detail : String(e && e.message ? e.message : e);
+        return d.split(resolve(dataDir)).join(dataDir).slice(0, 600);
+      };
+      let store;
+      try {
+        const { openStore } = await import(pathToFileURL(resolve("src/store.ts")).href);
+        store = await openStore({ network: "mainnet", dataDir: resolve(dataDir), log: () => {} });
+      } catch (e) {
+        process.stdout.write(why(e) + "\n");
+        return 2;
+      }
+      let offers, trades;
+      try {
+        offers = (await store.listOffers()).filter((o) => o.closedAt == null).length;
+        trades = (await store.listTrades()).filter((t) => !t.endedAt).length;
+      } catch (e) {
+        process.stdout.write(why(e) + "\n");
+        return 2;
+      } finally {
+        await store.close().catch(() => {});
+      }
+      if (offers + trades === 0) return 3;
+      process.stdout.write(offers + " open offer(s) and " + trades + " unfinished trade(s) in " + dataDir + "\n");
+      return 0;
+    };
+    process.exitCode = await main();
+    setTimeout(() => process.exit(), 5000).unref();
+  ' "$1"
+}
+
+# What a config that lists nothing leaves to a start: the saved work market_main found ($work), or why the saved state
+# could not be read ($unread).
+saved_work_note() { # <config> <start|note>
+  say ""
+  if [ -n "$work" ]; then
+    if [ "$2" = start ]; then
+      say "$1 lists no offers, bids or orders, but the market bot still has $work. A start cancels those offers and finishes those trades; Ctrl-C once then stops it when they are done."
+    else
+      say "$1 lists no offers, bids or orders, but the market bot still has $work. Start it (sh start.sh mainnet) to cancel those offers and finish those trades: Ctrl-C once then stops it when they are done."
+    fi
+  else
+    say "$1 lists no offers, bids or orders, and this script could not read the market bot's saved state:"
+    say "  $unread"
+    if [ "$2" = start ]; then
+      say "A start cancels any open offers and finishes any unfinished trades in it, or says why it cannot; Ctrl-C once then stops it when they are done."
+    else
+      say "If it holds open offers or unfinished trades, a start (sh start.sh mainnet) cancels those offers and finishes those trades, or says why it cannot."
+    fi
+  fi
+}
+
+nothing_listed_note() { # <config>: after a dry run
   if config_lists_nothing "$1"; then
-    say ""
-    say "$1 lists no offers, bids or orders yet, so the market bot has nothing to do. Add yours there (examples/README.md, \"The config\"), then start it again."
+    if [ -n "$work$unread" ]; then
+      saved_work_note "$1" note
+    else
+      say ""
+      say "$1 lists no offers, bids or orders yet, so the market bot has nothing to do. Add yours there (examples/README.md, \"The config\"), then start it again."
+    fi
   fi
 }
 
@@ -645,7 +716,21 @@ market_main() { # [the market bot's options]
   [ -f "$cfg" ] || die "there is no config $cfg (sh start.sh mainnet setup makes $MARKET_CONFIG)"
   # The bot's own switch for a mainnet config; KIT_ALLOW_MAINNET=1, its other one, is given below run by run.
   [ "$M_MAINNET" = 1 ] || set -- "$@" --mainnet
-  if [ "$M_MODE" = dry-run ] || config_lists_nothing "$cfg"; then
+  # A config that lists nothing leaves the bot nothing to do, unless its saved state still holds open offers or
+  # unfinished trades: those need a start (it cancels the offers, and claims or refunds what is due).
+  work=''
+  unread=''
+  idle=0
+  if config_lists_nothing "$cfg"; then
+    saved_rc=0
+    saved_out=$(market_saved_work "$cfg") || saved_rc=$?
+    case "$saved_rc" in
+      0) work=$saved_out ;;
+      3) idle=1 ;;
+      *) unread=${saved_out:-the check stopped on an error (above)} ;;
+    esac
+  fi
+  if [ "$M_MODE" = dry-run ] || [ "$idle" = 1 ]; then
     say ""
     say "Dry run of the market bot on mainnet: it reads the board and both chains and sends nothing."
     [ "$M_MODE" = dry-run ] || set -- "$@" --dry-run
@@ -655,10 +740,12 @@ market_main() { # [the market bot's options]
     nothing_listed_note "$cfg"
     return "$rc"
   fi
-  if [ "${KIT_ALLOW_MAINNET:-}" = 1 ]; then
-    say ""
-    say "KIT_ALLOW_MAINNET=1 is set, so the market bot starts without a question."
-  elif is_interactive; then
+  if [ -n "$work$unread" ]; then
+    saved_work_note "$cfg" start
+  fi
+  # In a terminal: always the dry run and the yes, whatever is set. KIT_ALLOW_MAINNET=1 stands in for the yes only
+  # without a terminal to ask in (a service).
+  if is_interactive; then
     say ""
     say "First a dry run: it reads the board and both chains, shows what the bot would list and take, and sends nothing."
     if ! KIT_ALLOW_MAINNET=1 "$NODE" --import tsx examples/market-bot.ts "$@" --dry-run; then
@@ -667,7 +754,11 @@ market_main() { # [the market bot's options]
       return 1
     fi
     say ""
-    say "That is what the market bot lists and takes on mainnet, with real funds, at the prices in $cfg."
+    if [ -n "$work$unread" ]; then
+      say "That is what the market bot does on mainnet, with real funds: it lists and takes nothing new, and it cancels the open offers and finishes the unfinished trades in its saved state."
+    else
+      say "That is what the market bot lists and takes on mainnet, with real funds, at the prices in $cfg."
+    fi
     printf '%s' 'Start it now? Type yes to start, anything else to stop here: '
     answer=''
     read -r answer || :
@@ -678,6 +769,9 @@ market_main() { # [the market bot's options]
         return 0
         ;;
     esac
+  elif [ "${KIT_ALLOW_MAINNET:-}" = 1 ]; then
+    say ""
+    say "KIT_ALLOW_MAINNET=1 is set and there is no terminal to ask in, so the market bot starts without a question."
   else
     die "on mainnet the market bot starts only once you type yes in a terminal, or with KIT_ALLOW_MAINNET=1 already set (for a start without a terminal). sh start.sh mainnet dry-run shows what it would do"
   fi
@@ -756,6 +850,7 @@ case "$cmd" in
     market_main ${1+"$@"}
     ;;
   dry-run | dryrun)
+    [ "$#" = 0 ] || die "sh start.sh dry-run takes nothing after it: the network goes first (sh start.sh mainnet dry-run), and the market bot's options after market (sh start.sh market --config <file> --dry-run)"
     choose_network
     if [ "$NETWORK" = mainnet ]; then
       market_main --dry-run
@@ -766,6 +861,7 @@ case "$cmd" in
     fi
     ;;
   faucet)
+    [ "$#" = 0 ] || die "sh start.sh faucet takes nothing after it (it is devnet's: sh start.sh devnet faucet)"
     devnet_only faucet
     find_node
     proxy_setting
@@ -775,12 +871,18 @@ case "$cmd" in
     [ "$SERVED" -gt 0 ]
     ;;
   setup)
+    [ "$#" = 0 ] || die "sh start.sh setup takes nothing after it: the network goes first (sh start.sh mainnet setup)"
     choose_network
     if [ "$NETWORK" = mainnet ]; then
       intro_mainnet
       setup_node
+      had_config=0
+      if [ -e "$MARKET_CONFIG" ]; then had_config=1; fi
       market_setup
       say ""
+      if [ "$had_config" = 1 ]; then
+        say "$MARKET_CONFIG was there already, so nothing new was made. The market bot's addresses are on the Addresses line of sh start.sh mainnet dry-run."
+      fi
       if config_lists_nothing "$MARKET_CONFIG"; then
         say "Set up. Add your offers to $MARKET_CONFIG, then start the market bot with: sh start.sh mainnet"
       else

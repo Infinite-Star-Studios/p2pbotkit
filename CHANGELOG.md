@@ -7,6 +7,39 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.2.2 (11 November 2026)
+
+`start.sh` and the READMEs only. No trade, check, pin or setting of the kit
+changes.
+
+- In a terminal, a mainnet start always shows the dry run and asks you to
+  type yes, even with `KIT_ALLOW_MAINNET=1` set, as the README says. That
+  variable stands in for the yes only without a terminal (a service). 0.2.0
+  and 0.2.1 also took it in a terminal, and then started the bot at once.
+- When `market.mainnet.json` lists nothing but the market bot's saved state
+  still holds open offers or unfinished trades, a mainnet start no longer
+  stops after the dry run. It goes on (the dry run, then your yes; or
+  `KIT_ALLOW_MAINNET=1` without a terminal), and the bot cancels those offers
+  and finishes those trades. `sh start.sh mainnet dry-run` names them, or
+  says why the saved state could not be read (sealed, or in use by a running
+  bot).
+- `dry-run`, `setup` and `faucet` refuse anything after them instead of
+  ignoring it: the network goes first (`sh start.sh mainnet dry-run`), and
+  the market bot's options after `market`
+  (`sh start.sh market --config <file> --dry-run`).
+- On mainnet the faucet's refusal, and `sh start.sh mainnet setup` once the
+  config is there, point to the market bot's addresses on the `Addresses`
+  line of `sh start.sh mainnet dry-run`. Setup showed them only the first
+  time.
+- `start.sh` makes `market.mainnet.json` only where nothing is there yet. A
+  folder at that name, or a link to a folder or to nothing, is refused;
+  0.2.0 copied the example config into that folder, or through the link.
+- README: the Saturn site's file is still version 0.1.4, without `start.sh`
+  or the market bot; a start in a terminal waits at the network question,
+  so a script or a terminal nobody answers names the network
+  (`sh start.sh devnet`); and the tests skipped outside Saturn's source tree
+  are 16, plus one that only a release without mainnet's pins runs.
+
 ## 0.2.1 (11 November 2026)
 
 `start.sh` only: the Node it downloads is now 22.23.5, the November 2026
