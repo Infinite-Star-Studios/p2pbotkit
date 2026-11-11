@@ -29,8 +29,10 @@
 set -eu
 umask 077
 
-# The Node this script downloads into ./.node when the machine has no Node 22 or later.
-KIT_NODE_VERSION=22.23.4
+# The Node this script downloads into ./.node when the machine has no Node 22 or later
+# (22.23.5: the November 2026 security release). An older Node 22 in ./.node is
+# replaced by this one on the next start.
+KIT_NODE_VERSION=22.23.5
 
 say() { printf '%s\n' "$*"; }
 die() {
@@ -105,7 +107,7 @@ sha256_of() { # <file>
   fi
 }
 
-download_node() {
+download_node() { # [what to say before the download, when not the first one]
   if [ "${KIT_NO_NODE_DOWNLOAD:-}" = 1 ]; then
     die "Node 22 or later is needed: install it (https://nodejs.org), then run sh start.sh again"
   fi
@@ -140,7 +142,7 @@ download_node() {
   work="$KIT_DIR/.node-download"
   rm -rf "$work"
   mkdir -p "$work"
-  say "No Node 22 or later here: downloading Node $KIT_NODE_VERSION ($os-$arch) from nodejs.org into ./.node."
+  say "${1:-No Node 22 or later here}: downloading Node $KIT_NODE_VERSION ($os-$arch) from nodejs.org into ./.node."
   say "It is used by this kit only; nothing is installed for the rest of the machine."
   if ! fetch "$url/$name.tar.gz" "$work/$name.tar.gz" || ! fetch "$url/SHASUMS256.txt" "$work/SHASUMS256.txt"; then
     rm -rf "$work"
@@ -152,9 +154,21 @@ download_node() {
     die "the Node download does not match nodejs.org's list of SHA-256 sums; nothing was installed"
   fi
   say "SHA-256 checked against nodejs.org's list: OK."
-  tar -xzf "$work/$name.tar.gz" -C "$work"
-  rm -rf "$KIT_DIR/.node"
-  mv "$work/$name" "$KIT_DIR/.node"
+  # Each step checks itself: this also runs inside an if (replacing an older ./.node), where set -e does not act.
+  if ! tar -xzf "$work/$name.tar.gz" -C "$work" || [ ! -x "$work/$name/bin/node" ]; then
+    rm -rf "$work"
+    die "the Node download could not be unpacked (is the disk full?); nothing was installed"
+  fi
+  # An older ./.node is kept aside until the new one is in place.
+  if [ -e "$KIT_DIR/.node" ] && ! mv "$KIT_DIR/.node" "$work/previous"; then
+    rm -rf "$work"
+    die "./.node could not be moved aside to put Node $KIT_NODE_VERSION in its place; nothing changed"
+  fi
+  if ! mv "$work/$name" "$KIT_DIR/.node"; then
+    if [ -e "$work/previous" ]; then mv "$work/previous" "$KIT_DIR/.node" || :; fi
+    rm -rf "$work"
+    die "Node $KIT_NODE_VERSION could not be put in ./.node; nothing changed"
+  fi
   rm -rf "$work"
 }
 
@@ -165,13 +179,36 @@ use_local_node() {
   export PATH
 }
 
+# Exit 0 when Node $1 is in the same major line as $2 and older than it.
+older_in_line() { # <node binary> <version>
+  "$1" -e 'const n=process.versions.node.split(".").map(Number),w=process.argv[1].split(".").map(Number);process.exit(n[0]===w[0]&&(n[1]<w[1]||(n[1]===w[1]&&n[2]<w[2]))?0:1)' "$2" 2>/dev/null
+}
+
 find_node() {
   if command -v node >/dev/null 2>&1 && [ "$(node_major node)" -ge 22 ] 2>/dev/null; then
     NODE=$(command -v node)
     NPM=$(command -v npm 2>/dev/null) || die "Node $(node --version) is installed but npm is not: install npm (it comes with Node from https://nodejs.org), then run sh start.sh again"
+    if older_in_line "$NODE" "$KIT_NODE_VERSION"; then
+      say "Note: this machine has Node $("$NODE" --version); Node $KIT_NODE_VERSION has security fixes for it. Update Node when you can (https://nodejs.org)."
+    fi
     return
   fi
   if [ -x "$KIT_DIR/.node/bin/node" ] && [ "$(node_major "$KIT_DIR/.node/bin/node")" -ge 22 ] 2>/dev/null; then
+    have=$("$KIT_DIR/.node/bin/node" -p 'process.versions.node' 2>/dev/null || :)
+    if older_in_line "$KIT_DIR/.node/bin/node" "$KIT_NODE_VERSION"; then
+      # The kit's own Node from an earlier start, older than this script's (a security release, say): replace it.
+      # download_node keeps the old one until the new one is checked; if the download fails, the old one stays in use.
+      if [ "${KIT_NO_NODE_DOWNLOAD:-}" = 1 ]; then
+        say "The kit's own Node in ./.node is $have; this kit uses Node $KIT_NODE_VERSION, which KIT_NO_NODE_DOWNLOAD=1 keeps it from downloading: $have stays in use."
+      elif (download_node "The kit's own Node in ./.node is $have, and this kit uses $KIT_NODE_VERSION"); then
+        if ! "$KIT_DIR/.node/bin/node" --version >/dev/null; then
+          rm -rf "$KIT_DIR/.node"
+          die "the downloaded Node does not start on this machine (the error is above; nodejs.org's Linux builds need glibc 2.28 or later). Install Node 22 or later yourself, then run sh start.sh again"
+        fi
+      else
+        say "Node $KIT_NODE_VERSION could not be downloaded (the reason is above): the kit's Node $have stays in use for now."
+      fi
+    fi
     use_local_node
     return
   fi

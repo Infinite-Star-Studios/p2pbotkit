@@ -56,10 +56,14 @@ nothing here costs or risks money. `sh start.sh devnet` skips the question.
 
 ### What `sh start.sh` does on devnet
 
-1. **Node.** It uses your Node if it is version 22 or later. If not, it
-   downloads Node 22.23.4 from nodejs.org into `./.node`, checks it against
-   nodejs.org's list of SHA-256 sums, and uses it for this kit only: nothing
-   is installed for the rest of the machine.
+1. **Node.** It uses your Node if it is version 22 or later, and says so
+   when Node 22.23.5 (the November 2026 security release) has fixes for your
+   Node 22. If you have no Node 22 or later, it downloads Node 22.23.5 from
+   nodejs.org into `./.node`, checks it against nodejs.org's list of SHA-256
+   sums, and uses it for this kit only: nothing is installed for the rest of
+   the machine. An older Node 22 in `./.node`, from an earlier start, is
+   replaced by 22.23.5 the same way; if that download fails, the old one
+   stays in use.
 2. **Packages.** `npm ci --ignore-scripts` installs exactly the versions in
    `package-lock.json`, and no package runs an install script. Later starts
    skip this step until the lockfile or the Node version changes. npm may

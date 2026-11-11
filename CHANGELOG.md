@@ -7,6 +7,18 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.2.1 (11 November 2026)
+
+`start.sh` only: the Node it downloads is now 22.23.5, the November 2026
+Node.js security release (nodejs.org/en/blog/vulnerability/november-2026-security-releases).
+No trade, check, pin or setting of the kit changes.
+
+- A `./.node` from an earlier start (22.23.4) is replaced by 22.23.5 on the
+  next start, checked against nodejs.org's SHA-256 list like a first
+  download; if the download fails, the old one stays in use.
+- With your own Node 22 older than 22.23.5, `start.sh` says that 22.23.5 has
+  security fixes for it; it still runs.
+
 ## 0.2.0 (6 November 2026)
 
 `start.sh` runs on mainnet too, with a market bot of your own. No trade,
