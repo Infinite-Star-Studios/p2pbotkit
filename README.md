@@ -116,12 +116,14 @@ offers listed: sell offers, buy offers, or both.
 5. **A dry run, then your yes.** Each start typed at a terminal shows a dry
    run first (the balances, the open offers, the reference price, and what
    the bot would list and take; it sends nothing), then asks you to type
-   `yes`, even with `KIT_ALLOW_MAINNET=1` set. It asks also when its output
-   goes to a pipe or a file (`| tee market.log`, `> market.log`): the dry run
-   and the question then appear on the terminal itself, and the bot's lines
-   go where you sent them. Only then does it start the bot, with both
-   mainnet switches (`--mainnet` and `KIT_ALLOW_MAINNET=1`) for that bot
-   alone. While the config lists nothing, it stops after the dry run, unless
+   `yes`, even with `KIT_ALLOW_MAINNET=1` set. Only then does it start the
+   bot, with both mainnet switches (`--mainnet` and `KIT_ALLOW_MAINNET=1`)
+   for that bot alone. It asks also when its output goes to a pipe or a file
+   (`| tee -i market.log`, `> market.log`): the dry run and the question then
+   appear on the terminal itself, and the bot's lines go where you sent them.
+   With `tee`, use `-i`: a plain `tee` ends at the Ctrl-C that stops the bot,
+   and the lines of its stop are lost (the stop itself still runs). While the
+   config lists nothing, it stops after the dry run, unless
    the bot's saved state still holds open offers, unfinished trades, or
    requests to the board with no recorded answer: then the start goes on
    (the dry run, then your yes), and the bot finishes them.
@@ -134,10 +136,13 @@ be asked: `sh start.sh mainnet` then starts the bot only with
 run. At a terminal that variable changes nothing: the dry run and the
 question always come first. So an unattended start from a shell gives it no
 terminal input, for example
-`KIT_ALLOW_MAINNET=1 sh start.sh mainnet </dev/null >>market.log 2>&1 &`;
-started with `&` but with the terminal as its input, it stops at the
-question instead. `sh start.sh mainnet dry-run` sends nothing and needs no
-answer.
+`KIT_ALLOW_MAINNET=1 sh start.sh mainnet </dev/null >>market.log 2>&1 &`.
+Closing that terminal then does not stop the bot; `kill` with its process
+id (`pgrep -f market-bot` shows it) stops it cleanly, as Ctrl-C once does.
+Started with `&` but with the terminal as its input, it stops at the
+question instead. For a bot that runs for days, a service manager (systemd,
+launchd) or a tmux session suits better. `sh start.sh mainnet dry-run`
+sends nothing and needs no answer.
 
 ### Good to know
 
@@ -172,6 +177,10 @@ answer.
   does not send in time counts as its no-show (3 in 24 hours pause it; "API
   keys and limits" below). A second press within half a second of the first
   counts as the same press.
+- **Without Ctrl-C:** `kill` with a bot's process id (SIGTERM) stops it
+  cleanly, as Ctrl-C once does, and so does a service manager's stop. When
+  the terminal a bot runs in closes, it stops cleanly too; one started with
+  no terminal on its input (`</dev/null`, a service) carries on.
 - **Starting again:** run `sh start.sh` in the kit's folder (`cd p2pbotkit`,
   or `p2pbotkit-main` from the ZIP); do not clone it again.
 

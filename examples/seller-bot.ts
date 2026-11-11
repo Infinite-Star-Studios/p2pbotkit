@@ -892,7 +892,49 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
 }
 
 /** Run a role's bot as the process's main script, and exit with its code. */
+/** What guardProcess needs of a process: the real one, or a test's. */
+export interface GuardableProcess {
+  readonly pid: number;
+  readonly stdin: { readonly isTTY?: boolean };
+  readonly stdout: { on(event: 'error', fn: (e: Error) => void): unknown };
+  readonly stderr: { on(event: 'error', fn: (e: Error) => void): unknown };
+  on(event: 'SIGHUP', fn: () => void): unknown;
+  kill(pid: number, signal: 'SIGTERM'): unknown;
+}
+
+/**
+ * Before a bot starts (mainOf): a lost output or a hangup never cuts its
+ * clean stop short.
+ * - Its lines are best effort. A log pipe that closed (EPIPE: `| tee`, which
+ *   the same Ctrl-C ends) or a terminal that is gone (EIO) no longer throws
+ *   out of a stop that is cancelling offers and finishing trades.
+ * - A hangup (the terminal closed, an SSH connection dropped) no longer kills
+ *   it mid-trade; Node undoes the ignored SIGHUP that nohup leaves. With no
+ *   terminal on its input (a service, `</dev/null`), nobody reads that
+ *   terminal and the bot carries on. With one, the person's terminal is
+ *   gone, and the bot stops cleanly, as on Ctrl-C (SIGTERM, which the runner
+ *   handles).
+ */
+export function guardProcess(p: GuardableProcess = process): void {
+  const lost = (e: Error): void => {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== 'EPIPE' && code !== 'EIO') throw e;
+  };
+  p.stdout.on('error', lost);
+  p.stderr.on('error', lost);
+  const attended = p.stdin.isTTY === true;
+  // The kernel and the shell each send their own SIGHUP when a terminal closes: one hangup, one clean stop (a second
+  // SIGTERM half a second later would be a second Ctrl-C, which exits at once).
+  let hungUp = false;
+  p.on('SIGHUP', () => {
+    if (!attended || hungUp) return;
+    hungUp = true;
+    p.kill(p.pid, 'SIGTERM');
+  });
+}
+
 export async function mainOf(role: Role): Promise<void> {
+  guardProcess();
   const code = await runBot({ role });
   process.exitCode = code;
   // Exit even when a transport keeps a socket open after the kit closed.

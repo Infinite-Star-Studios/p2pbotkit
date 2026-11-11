@@ -204,8 +204,8 @@ and name any check a real start would stop on.
 
 ## Upgrading the kit
 
-A kit from the kit's repository (0.2.0 or later, with `start.sh`) upgrades
-with `git pull` in its folder, which leaves `keys/`, `data/` and
+A kit cloned from the kit's repository (it has `start.sh`) upgrades with
+`git pull` in its folder, which leaves `keys/`, `data/` and
 `market.mainnet.json` as they are (`../README.md` says how, and how with the
 ZIP). The steps below are for the file from the Saturn site, which is still
 0.1.4: following them from a newer kit would take it back to 0.1.4.

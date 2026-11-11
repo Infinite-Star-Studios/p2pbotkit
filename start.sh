@@ -369,6 +369,7 @@ setup_node() {
 }
 
 setup() { # [skip-faucet]: devnet's setup
+  devnet_env
   say "Saturn P2P bot kit, devnet: test tokens only, no real money. Your keys stay on this machine."
   say "You use it at your own risk: it comes as is, without warranty of any kind (MIT License, see LICENSE)."
   setup_node
@@ -508,12 +509,13 @@ set_network() { # <devnet|mainnet> <where it was named>
 # the output is that terminal, or, when the output goes to a pipe or a file, the terminal itself (/dev/tty).
 can_show() { [ -t 1 ] || (: >/dev/tty) 2>/dev/null; }
 
-# Run "$@" (a function that shows a question and reads the answer) with its output on the terminal.
+# Run "$@" (a function that shows a question and reads the answer) on the terminal: when the output goes to a pipe or a
+# file, the question is shown on /dev/tty and the answer read from it too, so both are on the same terminal.
 on_terminal() {
   if [ -t 1 ]; then
     "$@"
   else
-    "$@" >/dev/tty 2>&1
+    "$@" </dev/tty >/dev/tty 2>&1
   fi
 }
 
@@ -555,6 +557,10 @@ ask_network() {
   done
 }
 
+# On devnet nothing may meet a bot's mainnet switch: KIT_ALLOW_MAINNET goes, whatever the shell exported, so a devnet
+# command can never start a bot on mainnet (the bots' runner trades there only with it).
+devnet_env() { unset KIT_ALLOW_MAINNET; }
+
 # The example bots and the faucet are devnet's.
 devnet_only() { # <command>
   if [ "$NETWORK" = mainnet ]; then
@@ -564,6 +570,7 @@ devnet_only() { # <command>
     esac
   fi
   NETWORK=devnet
+  devnet_env
 }
 
 # ── Mainnet: your own market bot ─────────────────────────────────────────────
@@ -666,6 +673,15 @@ market_saved_work() { # <config>
   ' "$1"
 }
 
+# The argument as one shell word, as typed it means itself: as it is when it holds only plain characters, otherwise in
+# single quotes (each single quote in it written as '\'').
+sh_quote() {
+  case "$1" in
+    '' | *[!A-Za-z0-9._/@%+=:,-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # The command that starts this market bot again, or with dry-run the one that dry-runs it: its config is named when it
 # is not the default one.
 market_again() { # <config> [dry-run]
@@ -673,10 +689,7 @@ market_again() { # <config> [dry-run]
     if [ "${2:-}" = dry-run ]; then printf '%s' 'sh start.sh mainnet dry-run'; else printf '%s' 'sh start.sh mainnet'; fi
     return 0
   fi
-  case "$1" in
-    *[[:space:]]*) again_cfg="\"$1\"" ;;
-    *) again_cfg=$1 ;;
-  esac
+  again_cfg=$(sh_quote "$1")
   if [ "${2:-}" = dry-run ]; then
     printf 'sh start.sh market --config %s --dry-run' "$again_cfg"
   else
@@ -693,8 +706,8 @@ market_addresses() { # <config>
     import { pathToFileURL } from "node:url";
     const main = async () => {
       let keys;
-      try { keys = JSON.parse(readFileSync(process.argv[1], "utf8")).keys; } catch { process.stdout.write("the config could not be read as JSON\n"); return 2; }
-      if (!keys || typeof keys.pha !== "string" || typeof keys.base !== "string") { process.stdout.write("the config names no key files (keys.pha and keys.base)\n"); return 2; }
+      try { keys = JSON.parse(readFileSync(process.argv[1], "utf8")).keys; } catch { process.stdout.write("the config could not be read as JSON.\n"); return 2; }
+      if (!keys || typeof keys.pha !== "string" || typeof keys.base !== "string") { process.stdout.write("the config names no key files (keys.pha and keys.base).\n"); return 2; }
       try {
         const { loadKeys } = await import(pathToFileURL(resolve("src/keys.ts")).href);
         const k = await loadKeys({ network: "mainnet", phaKeyFile: resolve(keys.pha), baseKeyFile: resolve(keys.base) });
@@ -851,7 +864,7 @@ market_main() { # [the market bot's options]
       *) return 1 ;;
     esac
     if ! [ -t 1 ]; then
-      say "Starting it. Its lines go to this command's output (the pipe or file it was given), not to this terminal." >/dev/tty || :
+      say "Starting it. Its lines go to this command's output (the pipe or file it was given), not to this terminal. Ctrl-C once still stops it cleanly; with | tee, use tee -i, as a plain tee ends at that Ctrl-C and the stop's lines are lost." >/dev/tty || :
     fi
   elif [ "${KIT_ALLOW_MAINNET:-}" = 1 ]; then
     if [ -n "$work$unread" ]; then
@@ -921,6 +934,7 @@ case "$cmd" in
       case "$a" in
         --help | -h) bot_mode=help ;;
         --dry-run) [ "$bot_mode" = help ] || bot_mode=dry-run ;;
+        --mainnet | --mainnet=*) die "the $cmd bot runs on devnet only. A mainnet config runs as the market bot, with a dry run first and your yes: sh start.sh market --config <file>" ;;
       esac
     done
     if [ "$bot_mode" = start ]; then setup; else setup skip-faucet; fi
@@ -985,7 +999,7 @@ case "$cmd" in
         if addresses=$(market_addresses "$MARKET_CONFIG"); then
           say "The market bot's addresses, from the key files $MARKET_CONFIG names: $addresses"
         else
-          say "The market bot's key files, as $MARKET_CONFIG names them, could not be read: $addresses"
+          die "the market bot's key files, as $MARKET_CONFIG names them, could not be read: $addresses Fix them, or the keys in $MARKET_CONFIG, then run sh start.sh mainnet setup again"
         fi
       fi
       if config_lists_nothing "$MARKET_CONFIG"; then

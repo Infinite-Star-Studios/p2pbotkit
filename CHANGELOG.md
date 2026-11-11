@@ -7,6 +7,38 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.2.4 (11 November 2026)
+
+`start.sh`, the bots' process guard (`examples/seller-bot.ts`) and the
+READMEs. No trade, check, pin or setting of the kit changes.
+
+- A bot's lines are best effort: a log pipe that closed, or a terminal that
+  is gone, no longer cuts its clean stop short. With 0.2.3,
+  `sh start.sh mainnet | tee market.log` and then Ctrl-C (which ends `tee`
+  too) ended the market bot at the first stop line it could not write,
+  before it had cancelled its offers and finished its trades. The README
+  now names `tee -i`, which also keeps the stop's lines.
+- A hangup (the terminal closed, an SSH connection dropped) no longer kills
+  a bot mid-trade. Started with no terminal on its input (`</dev/null`, a
+  service), it carries on; started at a terminal, it stops cleanly, as on
+  Ctrl-C once. Node undoes the ignored hangup that `nohup` leaves, so
+  `nohup` alone never kept a bot running. `kill` with its process id stops
+  a bot cleanly.
+- `sh start.sh seller` and `sh start.sh buyer` refuse `--mainnet`, and no
+  devnet command passes `KIT_ALLOW_MAINNET` on to a bot, so a devnet command
+  can never start one on mainnet. With that variable exported, 0.2.0 to
+  0.2.3 let `sh start.sh seller --config market.mainnet.json --mainnet`
+  trade on mainnet with no dry run and no yes.
+- The `--config` commands in the notes and refusals quote a file name that
+  holds shell characters (a space, a quote, `$`, `;`), so that it can be
+  pasted back as it is.
+- When the output goes to a pipe or a file, the answer to a question is read
+  from the terminal that shows the question.
+- `sh start.sh mainnet setup` stops with the reason when the key files its
+  config names cannot be read, instead of ending with "Set up."
+- examples/README: a kit cloned from the repository (which has had
+  `start.sh` since 0.1.1) upgrades with `git pull`.
+
 ## 0.2.3 (11 November 2026)
 
 `start.sh` and the READMEs only. No trade, check, pin or setting of the kit
@@ -21,7 +53,7 @@ changes.
   0.2.1. `KIT_ALLOW_MAINNET=1` stands in for the yes only when there is no
   terminal on the input (a service, cron, or `</dev/null`), and where the
   question cannot be shown at all, the start is refused. The network
-  question follows the same rule.
+  question is asked on the terminal the same way.
 - With a config that lists nothing, a start also goes on when the saved
   state holds a request to the board with no recorded answer (an offer or a
   take whose answer was lost): the bot settles it with the board first.

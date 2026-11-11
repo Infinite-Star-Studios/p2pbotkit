@@ -50,7 +50,7 @@ import type { PhaRpc, PhaCall, PhaBalance, PhaTxState } from '../src/pha.js';
 import { loadKeys } from '../src/keys.js';
 import { openStore } from '../src/store.js';
 import type { Offer, Trade } from '../src/types.js';
-import { runBot, parseBotConfig, kitOptions, botPolicy, networkGate, readOnlyTransports, defaultConfigPath, referenceLines, sameOffer, describeOffer, MARKET_CONFIG, type BotKit, type Role } from '../examples/seller-bot.js';
+import { runBot, parseBotConfig, kitOptions, botPolicy, networkGate, readOnlyTransports, defaultConfigPath, referenceLines, sameOffer, describeOffer, guardProcess, MARKET_CONFIG, type BotKit, type Role } from '../examples/seller-bot.js';
 import { main as newKeysMain, makeKeyPairs } from '../examples/new-keys.js';
 import { main as faucetMain } from '../examples/faucet.js';
 import { main as pruneMain, pruneSecrets, KEEP_DAYS, type PruneChains } from '../examples/prune.js';
@@ -1584,6 +1584,48 @@ describe('the runner (seller-bot.ts) on a fake kit', () => {
 });
 
 // ── 4. new-keys.ts ──────────────────────────────────────────────────────────
+
+/** A process for guardProcess: its signals, and the kills it asks for. */
+function fakeProcess(isTTY?: boolean) {
+  const kills: Array<[number, string]> = [];
+  const signals = new EventEmitter();
+  const p = {
+    pid: 4242,
+    stdin: isTTY === undefined ? {} : { isTTY },
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+    on(event: 'SIGHUP', fn: () => void) { signals.on(event, fn); return p; },
+    kill(pid: number, signal: 'SIGTERM') { kills.push([pid, signal]); return true; }
+  };
+  return { p, kills, hangUp: () => signals.emit('SIGHUP') };
+}
+
+describe('guardProcess (mainOf): a lost output or a hangup never cuts a clean stop short', () => {
+  test('EPIPE (a log pipe that closed) and EIO (a terminal that is gone) on stdout or stderr are swallowed; any other error still throws', () => {
+    const { p } = fakeProcess(true);
+    guardProcess(p);
+    const err = (code: string) => Object.assign(new Error(code), { code });
+    for (const s of [p.stdout, p.stderr]) {
+      assert.doesNotThrow(() => s.emit('error', err('EPIPE')));
+      assert.doesNotThrow(() => s.emit('error', err('EIO')));
+      assert.throws(() => s.emit('error', err('ENOSPC')), /ENOSPC/);
+    }
+  });
+
+  test('a hangup with a terminal on the input becomes SIGTERM, the runner\'s clean stop; with none (a service, </dev/null) it is ignored', () => {
+    const attended = fakeProcess(true);
+    guardProcess(attended.p);
+    attended.hangUp();
+    attended.hangUp(); // the kernel's and the shell's: still one stop, never a second press that exits at once
+    assert.deepEqual(attended.kills, [[4242, 'SIGTERM']]);
+    for (const isTTY of [false, undefined]) {
+      const unattended = fakeProcess(isTTY);
+      guardProcess(unattended.p);
+      unattended.hangUp();
+      assert.deepEqual(unattended.kills, []);
+    }
+  });
+});
 
 describe('new-keys.ts', () => {
   test('writes 0600 key files in a 0700 folder, prints only the addresses and the faucet commands, and never replaces a file', async () => {
