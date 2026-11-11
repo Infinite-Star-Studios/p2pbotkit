@@ -111,23 +111,33 @@ offers listed: sell offers, buy offers, or both.
 4. **Funds.** Mainnet has no faucet. Send the bot only what it should trade:
    on Phantasma the tokens it sells, at least 1.1 SOUL and a few KCAL for
    fees; on Base the USDC it buys with and a little ETH for gas.
-5. **A dry run, then your yes.** Each start in a terminal shows a dry run
-   first (the balances, the open offers, the reference price, and what the
-   bot would list and take; it sends nothing), then asks you to type `yes`,
-   even with `KIT_ALLOW_MAINNET=1` set. Only then does it start the bot, with
-   both mainnet switches (`--mainnet` and `KIT_ALLOW_MAINNET=1`) for that bot
+   `sh start.sh mainnet setup` shows its two addresses again at any time,
+   also while the bot runs.
+5. **A dry run, then your yes.** Each start typed at a terminal shows a dry
+   run first (the balances, the open offers, the reference price, and what
+   the bot would list and take; it sends nothing), then asks you to type
+   `yes`, even with `KIT_ALLOW_MAINNET=1` set. It asks also when its output
+   goes to a pipe or a file (`| tee market.log`, `> market.log`): the dry run
+   and the question then appear on the terminal itself, and the bot's lines
+   go where you sent them. Only then does it start the bot, with both
+   mainnet switches (`--mainnet` and `KIT_ALLOW_MAINNET=1`) for that bot
    alone. While the config lists nothing, it stops after the dry run, unless
-   the bot's saved state still holds open offers or unfinished trades: then
-   the start goes on (the dry run, then your yes), and the bot cancels those
-   offers and finishes those trades.
+   the bot's saved state still holds open offers, unfinished trades, or
+   requests to the board with no recorded answer: then the start goes on
+   (the dry run, then your yes), and the bot finishes them.
 6. **Watch.** Open https://ops.saturnx.cc/p2p, with mainnet picked in the
    Network menu at the top of the page.
 
-Without a terminal (a service, a script) nothing can be asked: `sh start.sh
-mainnet` then starts the bot only with `KIT_ALLOW_MAINNET=1` already set in
-the environment, and without the dry run. In a terminal that variable
-changes nothing: the dry run and the question always come first.
-`sh start.sh mainnet dry-run` sends nothing and needs no answer.
+With no terminal on its input (a service, cron, or `</dev/null`) nothing can
+be asked: `sh start.sh mainnet` then starts the bot only with
+`KIT_ALLOW_MAINNET=1` already set in the environment, and without the dry
+run. At a terminal that variable changes nothing: the dry run and the
+question always come first. So an unattended start from a shell gives it no
+terminal input, for example
+`KIT_ALLOW_MAINNET=1 sh start.sh mainnet </dev/null >>market.log 2>&1 &`;
+started with `&` but with the terminal as its input, it stops at the
+question instead. `sh start.sh mainnet dry-run` sends nothing and needs no
+answer.
 
 ### Good to know
 
@@ -182,11 +192,11 @@ changes nothing: the dry run and the question always come first.
 
 The network's name goes first and skips the question: `sh start.sh mainnet
 dry-run`, `sh start.sh devnet setup`. `--network mainnet` does the same, and
-so does `KIT_NETWORK=mainnet` in the environment; without a terminal and
-without any of them, `start.sh` runs on devnet. In a terminal it asks and
-waits for the answer, so a start that nobody answers (a script run with
-`ssh -t`, a detached tmux or screen session) names the network:
-`sh start.sh devnet`. `seller`, `buyer` and `faucet` are devnet's and
+so does `KIT_NETWORK=mainnet` in the environment; with no terminal on its
+input and none of them, `start.sh` runs on devnet. At a terminal it asks and
+waits for the answer, also when its output goes to a pipe or a file, so a
+start that nobody answers (a script run with `ssh -t`, a detached tmux or
+screen session) names the network: `sh start.sh devnet`. `seller`, `buyer` and `faucet` are devnet's and
 `market` is mainnet's, so they need no name.
 
 `KIT_SKIP_FAUCET=1 sh start.sh` never asks the faucet on a start, and
@@ -329,6 +339,9 @@ To upgrade, download the new version and its `.sha256`, check it with
 again. The download never contains `keys/` or `data/`: keep them outside the
 unpacked folder (absolute paths in your config), or copy them across from
 the old folder. `examples/README.md` ("Upgrading the kit") has the steps.
+That is for the site's file, which is still 0.1.4: a kit from this
+repository upgrades with `git pull` (or a new ZIP) instead, as "Where things
+are" above says.
 
 ## Quick start on devnet
 

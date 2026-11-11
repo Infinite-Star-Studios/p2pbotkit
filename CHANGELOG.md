@@ -7,6 +7,41 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.2.3 (11 November 2026)
+
+`start.sh` and the READMEs only. No trade, check, pin or setting of the kit
+changes.
+
+- A mainnet start typed at a terminal always shows the dry run and asks you
+  to type yes, now also when its output goes to a pipe or a file
+  (`| tee market.log`, `> market.log`): the dry run and the question appear
+  on the terminal itself, and the bot's lines go where you sent them. 0.2.2
+  asked only when both its input and its output were the terminal, so such a
+  start with `KIT_ALLOW_MAINNET=1` exported began trading at once, as in
+  0.2.1. `KIT_ALLOW_MAINNET=1` stands in for the yes only when there is no
+  terminal on the input (a service, cron, or `</dev/null`), and where the
+  question cannot be shown at all, the start is refused. The network
+  question follows the same rule.
+- With a config that lists nothing, a start also goes on when the saved
+  state holds a request to the board with no recorded answer (an offer or a
+  take whose answer was lost): the bot settles it with the board first.
+- After a dry run of another config (`sh start.sh market --config <file>
+  --dry-run`), the note and the refusals name that config's own commands,
+  not `sh start.sh mainnet`.
+- The store's one-time notices (a stale lock taken over, a file made
+  private, sealing begun) reach the terminal during the saved-state check
+  instead of being dropped.
+- `sh start.sh mainnet setup` shows the market bot's addresses every time,
+  read from the key files its config names, offline and also while the bot
+  runs, and the mainnet faucet's refusal points to it again. The dry run's
+  `Addresses` line that 0.2.2 pointed to is not reached while the bot runs
+  (its saved state is in use) or without a network.
+- `sh start.sh dry-run devnet` and `sh start.sh setup mainnet` name the right
+  form (`sh start.sh devnet dry-run`, `sh start.sh mainnet setup`).
+- README and examples/README: what "at a terminal" means for the yes, an
+  unattended start from a shell (`</dev/null`), and that a kit from this
+  repository upgrades with `git pull`, not with the site's 0.1.4 file.
+
 ## 0.2.2 (11 November 2026)
 
 `start.sh` and the READMEs only. No trade, check, pin or setting of the kit
@@ -33,7 +68,7 @@ changes.
   time.
 - `start.sh` makes `market.mainnet.json` only where nothing is there yet. A
   folder at that name, or a link to a folder or to nothing, is refused;
-  0.2.0 copied the example config into that folder, or through the link.
+  0.2.0 tried to copy the example config into it.
 - README: the Saturn site's file is still version 0.1.4, without `start.sh`
   or the market bot; a start in a terminal waits at the network question,
   so a script or a terminal nobody answers names the network

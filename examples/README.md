@@ -204,6 +204,12 @@ and name any check a real start would stop on.
 
 ## Upgrading the kit
 
+A kit from the kit's repository (0.2.0 or later, with `start.sh`) upgrades
+with `git pull` in its folder, which leaves `keys/`, `data/` and
+`market.mainnet.json` as they are (`../README.md` says how, and how with the
+ZIP). The steps below are for the file from the Saturn site, which is still
+0.1.4: following them from a newer kit would take it back to 0.1.4.
+
 Your keys (`keys/`) and each bot's state (its `dataDir`, `data/<bot>` in the
 examples) are the only files that matter. `data/` holds the swap secrets and
 control tokens of unfinished trades. The download never contains `keys/` or
@@ -316,9 +322,10 @@ up:
   bot lists and takes nothing until you add yours, with the keys of "The
   config" above. One config may hold both `offers` and `bids`, which keeps
   both sides of a token listed;
-- a dry run, then the bot starts once you type `yes`; in a terminal it
-  always asks. Only a start without a terminal (a service) starts it at
-  once, and only with `KIT_ALLOW_MAINNET=1` already set.
+- a dry run, then the bot starts once you type `yes`. A start typed at a
+  terminal always asks, also when its output goes to a pipe or a file. Only
+  a start with no terminal on its input (a service, cron, or `</dev/null`)
+  starts it at once, and only with `KIT_ALLOW_MAINNET=1` already set.
 
 By hand, in the kit's folder:
 `KIT_ALLOW_MAINNET=1 npm run market -- --mainnet --dry-run`, then the same
