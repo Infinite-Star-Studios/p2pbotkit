@@ -15,7 +15,8 @@
  *     input; a network that nobody named on a mainnet bot's volume;
  *   - the locks a killed bot leaves, which a new container's host name
  *     would turn into STORE_LOCKED: removed only where a volume is mounted
- *     in one container at a time, and only while no Node process runs;
+ *     in one container at a time, or when they are this container's own,
+ *     and only while no Node process runs;
  *   - mainnet: start.sh's own setup first, the config on the volume,
  *     KIT_MARKET_CONFIG, and a config whose paths are not the volume's;
  *   - KIT_HOLD;
@@ -27,7 +28,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -162,7 +163,10 @@ async function sleepsOf(b: Box): Promise<string[]> {
 }
 
 const modeOf = async (f: string) => ((await stat(f)).mode & 0o777).toString(8);
+/** The lock of a bot that ran in an earlier container: another host name, as the kit writes it (src/store.ts). */
 const LOCK = '{"pid":7,"host":"an-earlier-container","startedAt":1794574606411,"nonce":"87a54ffe65f0995e98e1d5628e16ada2"}\n';
+/** The lock of a bot that ran in this same container before (this machine's own host name). */
+const OWN_LOCK = `${JSON.stringify({ pid: 88, host: hostname(), startedAt: 1794574606411, nonce: '0f5c7a54ffe65f0995e98e1d5628e16a' })}\n`;
 
 async function lockIn(dir: string, text = LOCK): Promise<string> {
   await mkdir(dir, { recursive: true });
@@ -433,47 +437,60 @@ describe('docker/entrypoint.sh: locks left by an earlier container', { skip }, (
     for (const how of [{ KIT_STATE_DIR: '', RAILWAY_VOLUME_MOUNT_PATH: '' }, { KIT_CLEAR_LOCKS: '1' }] as Record<string, string>[]) {
       const b = await box();
       if ('RAILWAY_VOLUME_MOUNT_PATH' in how) how.RAILWAY_VOLUME_MOUNT_PATH = b.state;
-      const locks = [await lockIn(join(b.state, 'data', 'seller', 'devnet')), await lockIn(join(b.state, 'data', 'buyer', 'devnet')), await lockIn(join(b.state, 'my-bot', 'devnet'))];
+      const locks = [await lockIn(join(b.state, 'data', 'seller', 'devnet')), await lockIn(join(b.state, 'data', 'buyer', 'devnet'), OWN_LOCK), await lockIn(join(b.state, 'my bot', 'devnet'))];
       await processOf(b, 1, '/usr/bin/tini');
       await processOf(b, 7, '/usr/bin/dash');
       const r = run(b, [], how);
       assert.equal(r.code, 0, r.err);
       for (const f of locks) {
         assert.ok(!existsSync(f), f);
-        assert.ok(r.out.includes(`Removed ${f}, the lock of a bot that ran in an earlier container.`), f);
+        assert.ok(r.out.includes(`Removed ${f}, the leftover lock of a bot that is gone.`), f);
       }
+      assert.doesNotMatch(r.out, /A bot's lock file is on/);
     }
   });
 
-  test('elsewhere nothing says that no other container holds the volume: the locks are left, named, and KIT_CLEAR_LOCKS=1 is how to say it', async () => {
+  test('elsewhere nothing says that no other container holds the volume: a lock that names another host is left and named, and KIT_CLEAR_LOCKS=1 is how to say it; this container\'s own leftover is removed all the same', async () => {
     const b = await box();
-    const f = await lockIn(join(b.state, 'data', 'seller', 'devnet'));
+    const theirs = await lockIn(join(b.state, 'data', 'seller', 'devnet'));
+    const mine = await lockIn(join(b.state, 'data', 'buyer', 'devnet'), OWN_LOCK);
     const r = run(b);
     assert.equal(r.code, 0, r.err);
-    assert.ok(existsSync(f), 'a lock that may be a live bot\'s in another container is never removed unasked');
-    assert.ok(r.out.includes(`A bot's lock file is on ${b.state}:\n  ${f}\n`));
+    assert.ok(existsSync(theirs), 'a lock that may be a live bot\'s in another container is never removed unasked');
+    assert.ok(r.out.includes(`A bot's lock file is on ${b.state}:\n  ${theirs}\n`));
     assert.match(r.out, /If a bot runs on this volume in another container, leave it\. .* start with KIT_CLEAR_LOCKS=1 where this volume is mounted in one container at a time\./);
-    // KIT_CLEAR_LOCKS=0 leaves them on Railway too; any other value is refused.
+    // The same container, started again after a kill: its own lock is a leftover (the kit would take it over itself,
+    // but not when another process now has the old bot's id, as happens among a container's few ids).
+    assert.ok(!existsSync(mine), 'this container\'s own leftover');
+    assert.ok(r.out.includes(`Removed ${mine}, the leftover lock of a bot that is gone.`));
+    assert.ok(!r.out.includes(`  ${mine}\n`), 'and it is not named among those left');
+    // KIT_CLEAR_LOCKS=0 leaves them all, on Railway too; any other value is refused.
+    const again = await lockIn(join(b.state, 'data', 'buyer', 'devnet'), OWN_LOCK);
     assert.equal(run(b, [], { KIT_CLEAR_LOCKS: '0', RAILWAY_VOLUME_MOUNT_PATH: b.state }).code, 0);
-    assert.ok(existsSync(f));
-    const bad = run(b, [], { KIT_CLEAR_LOCKS: 'yes' });
-    assert.equal(bad.code, 1);
-    assert.match(bad.err, /KIT_CLEAR_LOCKS is 1 or 0, not "yes"/);
+    assert.ok(existsSync(theirs) && existsSync(again));
+    for (const value of ['yes', ' 1', 'true']) {
+      const bad = run(b, [], { KIT_CLEAR_LOCKS: value });
+      assert.equal(bad.code, 1);
+      assert.ok(bad.err.includes(`KIT_CLEAR_LOCKS is 1 or 0, not "${value}"`));
+    }
     // With no lock on the volume there is nothing to say.
-    await rm(f);
+    await rm(theirs);
+    await rm(again);
     assert.doesNotMatch(run(b).out, /lock/);
   });
 
   test('while a Node process runs in the container (a bot, a dry run, prune.ts), every lock is left: one of them may be its own', async () => {
     for (const exe of ['/usr/local/bin/node', '/app/.node/bin/node', '/usr/local/bin/node (deleted)']) {
-      const b = await box();
-      const f = await lockIn(join(b.state, 'data', 'seller', 'devnet'));
-      await processOf(b, 1, '/usr/bin/tini');
-      await processOf(b, 88, exe);
-      const r = run(b, [], { KIT_CLEAR_LOCKS: '1' });
-      assert.equal(r.code, 0, r.err);
-      assert.ok(existsSync(f), exe);
-      assert.match(r.out, /A Node process runs in this container already, so the lock files on .* are left as they are\./);
+      for (const how of [{ KIT_CLEAR_LOCKS: '1' }, {}] as Record<string, string>[]) {
+        const b = await box();
+        const f = await lockIn(join(b.state, 'data', 'seller', 'devnet'), OWN_LOCK);
+        await processOf(b, 1, '/usr/bin/tini');
+        await processOf(b, 88, exe);
+        const r = run(b, [], how);
+        assert.equal(r.code, 0, r.err);
+        assert.ok(existsSync(f), exe);
+        assert.match(r.out, /A Node process runs in this container already, so the lock files on .* are left as they are\./);
+      }
     }
     // A process whose program cannot be read (another user's) is known by the name it was started under.
     const other = await box();
@@ -502,9 +519,11 @@ describe('docker/entrypoint.sh: locks left by an earlier container', { skip }, (
     const half = await lockIn(join(b.state, 'data', 'half'), '{"nonce":"x"}\n');
     assert.equal(run(b, ['help'], { KIT_CLEAR_LOCKS: '1' }).code, 0);
     assert.ok(existsSync(f), 'help opens no store');
-    assert.equal(run(b, [], { KIT_CLEAR_LOCKS: '1' }).code, 0);
+    const r = run(b, [], { KIT_CLEAR_LOCKS: '1' });
+    assert.equal(r.code, 0);
     assert.ok(!existsSync(f), 'the kit\'s lock is removed');
     assert.ok(existsSync(other) && existsSync(half), 'the others are kept');
+    assert.ok(!r.out.includes(other) && !r.out.includes(half), 'and not spoken of');
   });
 });
 
@@ -604,6 +623,69 @@ describe('docker/entrypoint.sh: mainnet, the market bot\'s config on the volume'
     assert.deepEqual(await calls(b), []);
   });
 
+  test('the default config by any of its names is the default config, as start.sh reads the options: an empty --config, the file\'s own name, its place on the volume', async () => {
+    const forms = (b: Box) => [['market', '--config='], ['market', '--config', ''], ['market', '--config', 'market.mainnet.json'], ['market', '--config=./market.mainnet.json', '--dry-run'], ['market', '--config', join(b.kit, 'market.mainnet.json')], ['market', '--config', join(b.state, 'market.mainnet.json')]];
+    for (let i = 0; i < 6; i++) {
+      const b = await box();
+      const args = forms(b)[i]!;
+      const good = await marketConfig();
+      const r = run(b, args, { KIT_MARKET_CONFIG: good });
+      assert.equal(r.code, 0, `${args.join(' ')}: ${r.err}`);
+      const c = await calls(b);
+      assert.deepEqual(c.map((x) => x.args), [['mainnet', 'setup'], ['mainnet', ...args]], args.join(' '));
+      assert.equal(c[1]!.links.config, join(b.state, 'market.mainnet.json'), 'the kit\'s folder has the volume\'s config');
+      assert.equal(await readFile(join(b.state, 'market.mainnet.json'), 'utf8'), `${good}\n`);
+      assert.doesNotMatch(r.out, /KIT_MARKET_CONFIG is not used/);
+    }
+  });
+
+  test('a command with a config of its own still finds the volume\'s market.mainnet.json where the kit\'s folder has it', async () => {
+    const b = await box();
+    assert.equal(run(b, [], { KIT_NETWORK: 'mainnet' }).code, 0);
+    await rm(join(b.kit, 'market.mainnet.json'));
+    const own = join(b.state, 'other.json');
+    await writeFile(own, await marketConfig((c) => { c.dataDir = './data/other'; }));
+    assert.equal(run(b, ['market', '--config', own]).code, 0);
+    assert.equal(run(b, ['mainnet', 'seller']).code, 0);
+    const c = await calls(b);
+    assert.deepEqual(c.slice(-2).map((x) => x.links.config), [join(b.state, 'market.mainnet.json'), join(b.state, 'market.mainnet.json')]);
+  });
+
+  test('a mainnet bot\'s state in a data folder this config does not name is spoken of: start.sh looks only where the config says', async () => {
+    const b = await box();
+    assert.equal(run(b, [], { KIT_NETWORK: 'mainnet' }).code, 0);
+    await mkdir(join(b.state, 'data', 'market', 'mainnet'), { recursive: true });
+    const quiet = run(b, [], { KIT_NETWORK: 'mainnet' });
+    assert.equal(quiet.code, 0, quiet.err);
+    assert.doesNotMatch(quiet.out, /Note: /, 'the config\'s own data folder');
+    // The bot ran with ./data/market, and the config now names another folder: its open offers and trades are not there.
+    const r = run(b, [], { KIT_NETWORK: 'mainnet', KIT_MARKET_CONFIG: await marketConfig((c) => { c.dataDir = './data/market2'; }) });
+    assert.equal(r.code, 0, r.err);
+    assert.ok(r.out.includes(`Note: ${join(b.state, 'data', 'market')} holds a mainnet bot's state, and this config's dataDir is another folder.`));
+    assert.match(r.out, /Offers and trades still open there are not looked at, and not finished, by this start\./);
+  });
+
+  test('a path that leaves the volume through a link on it is not the volume\'s; KIT_STORE_KEY_FILE must be the volume\'s too', async () => {
+    const b = await box();
+    assert.equal(run(b, [], { KIT_NETWORK: 'mainnet' }).code, 0);
+    const outside = join(b.kit, '..', 'outside');
+    await mkdir(outside);
+    await symlink(outside, join(b.state, 'data', 'off'));
+    await rm(b.record);
+    const r = run(b, [], { KIT_NETWORK: 'mainnet', KIT_MARKET_CONFIG: await marketConfig((c) => { c.dataDir = './data/off/market'; }) });
+    assert.equal(r.code, 1);
+    assert.match(r.err, /its "dataDir" \(\.\/data\/off\/market\) is not on the volume/);
+    assert.deepEqual(await calls(b), []);
+    // The key that seals a bot's state: lost with the container, the state could not be read again.
+    for (const key of ['/root/store.key', './store.key', join(b.kit, 'store.key'), './data/off/store.key']) {
+      const x = run(b, [], { KIT_NETWORK: 'devnet', KIT_STORE_KEY_FILE: key });
+      assert.equal(x.code, 1, key);
+      assert.ok(x.err.includes(`KIT_STORE_KEY_FILE (${key}) is not on the volume`), key);
+    }
+    assert.deepEqual(await calls(b), []);
+    for (const key of ['./keys/store.key', join(b.state, 'keys', 'store.key'), join(b.state, 'store.key')]) assert.equal(run(b, [], { KIT_NETWORK: 'devnet', KIT_STORE_KEY_FILE: key }).code, 0, key);
+  });
+
   test('only a command that runs the market bot on market.mainnet.json makes the key pair and the config: not its help, not a config of its own, not a command start.sh refuses', async () => {
     const b = await box();
     const own = join(b.state, 'other.json');
@@ -697,17 +779,19 @@ describe('docker/entrypoint.sh: KIT_HOLD=1', { skip }, () => {
     assert.ok(Date.now() - at < 5_000);
   });
 
-  test('on mainnet the shell\'s dry run reads the config the next start will run: KIT_MARKET_CONFIG is written on hold too, a bad one only named; a volume with no config yet says so', async () => {
+  test('on mainnet the shell\'s dry run reads the config the next start will run: KIT_MARKET_CONFIG is written on hold too, a bad one only named; never onto a volume that has had no first start, which would leave the bot without its key pair', async () => {
     const b = await box();
-    const fresh = await hold(b, { KIT_NETWORK: 'mainnet' });
-    assert.match(fresh.text(), /There is no market\.mainnet\.json on the volume yet\. One made in this shell .* stays in this container/);
-    assert.equal(await fresh.end(), 0);
-    assert.ok(!existsSync(join(b.state, 'keys', 'mainnet')), 'a hold makes no key: a key pair can be put there first');
-
     const config = join(b.state, 'market.mainnet.json');
-    const old = await marketConfig();
-    await writeFile(config, `${old}\n`);
-    const next = await marketConfig((c) => { c.offers = []; });
+    const fresh = await hold(b, { KIT_NETWORK: 'mainnet', KIT_MARKET_CONFIG: await marketConfig() });
+    assert.match(fresh.text(), /KIT_MARKET_CONFIG is not written yet: this volume has no market\.mainnet\.json of a first start\./);
+    assert.match(fresh.text(), /There is no market\.mainnet\.json on the volume yet\. A start without KIT_HOLD makes it, and the market bot's key pair with it/);
+    assert.equal(await fresh.end(), 0);
+    assert.ok(!existsSync(config), 'the first start still finds no config, and so makes the key pair');
+    assert.ok(!existsSync(join(b.state, 'keys', 'mainnet')), 'a hold makes no key: a key pair can be put there first');
+    // The first start, then a hold with a changed config.
+    assert.equal(run(b, [], { KIT_NETWORK: 'mainnet' }).code, 0);
+    assert.ok(existsSync(join(b.state, 'keys', 'mainnet', 'market-pha.json')));
+    const next = await marketConfig();
     const h = await hold(b, { KIT_NETWORK: 'mainnet', KIT_MARKET_CONFIG: next });
     assert.ok(h.text().includes(`Wrote the market bot's config, ${config}, from KIT_MARKET_CONFIG.`));
     assert.equal(await readFile(config, 'utf8'), `${next}\n`);
@@ -720,12 +804,15 @@ describe('docker/entrypoint.sh: KIT_HOLD=1', { skip }, () => {
     assert.equal(await readFile(config, 'utf8'), `${next}\n`);
     assert.equal(await bad.end(), 0);
 
-    // With the network not named, a hold on a mainnet bot's volume is not refused: it starts no bot.
-    const unnamed = await hold(b);
+    // With the network not named, a hold on a mainnet bot's volume is not refused: it starts no bot. The variable is
+    // then not written, and that is said.
+    const unnamed = await hold(b, { KIT_MARKET_CONFIG: await marketConfig((c) => { c.offers = []; }) });
     assert.equal(unnamed.child.exitCode, null);
+    assert.match(unnamed.text(), /KIT_MARKET_CONFIG is not written: the network is not mainnet \(KIT_NETWORK\)\./);
+    assert.equal(await readFile(config, 'utf8'), `${next}\n`);
     assert.equal(await readlink(join(b.kit, 'market.mainnet.json')), config, 'the config is linked for the shell');
     assert.equal(await unnamed.end(), 0);
-    assert.deepEqual(await calls(b), []);
+    assert.deepEqual((await calls(b)).map((x) => x.args), [['mainnet', 'setup'], ['mainnet']], 'no hold ran start.sh');
   });
 });
 
@@ -733,7 +820,7 @@ describe('docker/entrypoint.sh: a start right after the last one', { skip }, () 
   const nowS = () => Math.floor(Date.now() / 1000);
   const markOf = async (b: Box) => (await readFile(join(b.state, '.last-start'), 'utf8')).trim().split(' ');
 
-  test('a first start, and a start after a run of half a minute or more, wait for nothing and leave their mark on the volume', async () => {
+  test('a first start, and a start after a run of five minutes or more, wait for nothing and leave their mark on the volume', async () => {
     const b = await box();
     const before = nowS();
     const r = run(b);
@@ -743,14 +830,14 @@ describe('docker/entrypoint.sh: a start right after the last one', { skip }, () 
     assert.ok(Number(at) >= before && Number(at) <= nowS() + 1, `the mark is the time of the start (${at})`);
     assert.equal(row, '0');
     // The last start was long ago, whatever came before it: the row starts again.
-    await writeFile(join(b.state, '.last-start'), `${nowS() - 31} 7\n`);
+    await writeFile(join(b.state, '.last-start'), `${nowS() - 301} 7\n`);
     assert.equal(run(b).code, 0);
     assert.deepEqual(await sleepsOf(b), []);
     assert.equal((await markOf(b))[1], '0');
     assert.equal((await calls(b)).length, 2);
   });
 
-  test('starts that follow each other within half a minute wait 5, 10, 20, 40, 80, 160 and then 300 seconds, and say so', async () => {
+  test('starts that follow each other within five minutes wait 5, 10, 20, 40, 80, 160 and then 300 seconds, and say so', async () => {
     const b = await box();
     const pauses = ['5', '10', '20', '40', '80', '160', '300', '300'];
     for (const [row, pause] of [...pauses.entries(), [41, '300'] as const]) {
@@ -764,6 +851,13 @@ describe('docker/entrypoint.sh: a start right after the last one', { skip }, () 
     }
     // Railway's ten restarts of a start that fails at once: about 25 minutes of waits in all.
     assert.equal(pauses.concat(['300', '300']).reduce((a, s) => a + Number(s), 0), 1515);
+    // A start that took long to fail (an RPC that accepts and does not answer: half a minute and more) counts too.
+    for (const ago of [33, 120, 299]) {
+      await rm(b.sleeps, { force: true });
+      await writeFile(join(b.state, '.last-start'), `${nowS() - ago} 2\n`);
+      assert.equal(run(b, [], { FAKE_EXIT: '1' }).code, 1);
+      assert.deepEqual(await sleepsOf(b), ['20'], `${ago} s after the last start`);
+    }
     // The real thing, with no mark written by hand: a bot that fails at once, started three times.
     const c = await box();
     for (let i = 0; i < 3; i++) assert.equal(run(c, [], { FAKE_EXIT: '1' }).code, 1);
@@ -842,7 +936,7 @@ describe('the image and its guide', { skip }, () => {
     const guide = await readKitFile('docs/RAILWAY.md');
     const script = await readKitFile('docker/entrypoint.sh');
     const read = [...new Set([...script.matchAll(/\$\{(KIT_[A-Z_]+)[:}]/g)].map((m) => m[1]!))].filter((v) => v !== 'KIT_PROC_DIR').sort();
-    assert.deepEqual(read, ['KIT_ALLOW_NO_VOLUME', 'KIT_CLEAR_LOCKS', 'KIT_HOLD', 'KIT_MARKET_CONFIG', 'KIT_NETWORK', 'KIT_START_ARGS', 'KIT_STATE_DIR']);
+    assert.deepEqual(read, ['KIT_ALLOW_NO_VOLUME', 'KIT_CLEAR_LOCKS', 'KIT_HOLD', 'KIT_MARKET_CONFIG', 'KIT_NETWORK', 'KIT_START_ARGS', 'KIT_STATE_DIR', 'KIT_STORE_KEY_FILE']);
     for (const v of [...read, 'KIT_ALLOW_MAINNET', 'KIT_SKIP_FAUCET', 'RAILWAY_DEPLOYMENT_DRAINING_SECONDS']) {
       assert.ok(guide.includes(`\`${v}`), `the guide names ${v}`);
       if (v.startsWith('KIT_') && v !== 'KIT_SKIP_FAUCET') assert.ok(script.includes(`#   ${v} `), `the entrypoint's own list names ${v}`);
@@ -856,7 +950,16 @@ describe('the image and its guide', { skip }, () => {
     assert.ok(script.includes('(start $((row + 1)) in a row): waiting $pause s before this one.'));
     assert.ok(script.includes('KIT_MARKET_CONFIG cannot be the market bot\'s config: '));
     assert.ok(script.includes('the network is not named, and this volume holds a mainnet bot\'s keys or state'));
-    for (const quoted of ['is not a volume', 'in a row): waiting', 'KIT_MARKET_CONFIG cannot be the market bot\'s config', 'the network is not named']) assert.ok(guide.includes(quoted), quoted);
+    assert.ok(script.includes('KIT_STORE_KEY_FILE ($KIT_STORE_KEY_FILE) is not on the volume'));
+    assert.match(script, /\[ \$\(\(now - last\)\) -lt 300 \]/);
+    assert.match(guide, /within five\s+minutes of the last one/);
+    for (const quoted of ['is not a volume', 'in a row): waiting', 'KIT_MARKET_CONFIG cannot be the market bot\'s config', 'the network is not named', 'is not on the volume', 'Stopping: no new offers or takes']) assert.ok(guide.includes(quoted), quoted);
+    // The stop instructions name lines the real bot prints.
+    assert.match(await readKitFile('src/flows/maker.ts'), /\[kit\] \$\{this\.network\}: running \(/);
+    assert.match(await readKitFile('examples/seller-bot.ts'), /Stopping: no new offers or takes\./);
+    assert.match(await readKitFile('examples/seller-bot.ts'), /Every trade of this bot is finished, and its offers are cancelled\. Stopped\./);
+    // (The guide wraps its rows: compare it with its blanks and row ends made one blank.)
+    assert.ok(guide.replace(/\s+/g, ' ').includes('Every trade of this bot is finished, and its offers are cancelled. Stopped.'));
     assert.match(await readKitFile('README.md'), /docs\/RAILWAY\.md/);
     // The kit's word scan (test/examples.test.ts), for the guide and the scripts too.
     const FORBIDDEN = /\b(peg|pegs|pegged|floor|floors|backed|issuance policy)\b/i;

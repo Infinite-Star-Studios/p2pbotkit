@@ -8,7 +8,7 @@
 #      config whose own paths are not on it;
 #   3. removes the lock files that a bot in an earlier container left on the volume, which the kit
 #      would otherwise take for a bot on another machine and refuse to start;
-#   4. waits before a start that follows the last one at once (a bot that keeps failing);
+#   4. waits before a start that follows the last one within minutes (a bot that keeps failing);
 #   5. runs "sh start.sh <network> ..." with no terminal on its input.
 #
 # From the environment:
@@ -22,10 +22,13 @@
 #   KIT_ALLOW_MAINNET    1: start.sh's own switch for a mainnet start that nobody can answer yes to
 #   KIT_HOLD             1: start no bot; keep the container running, to open a shell in it
 #   KIT_STATE_DIR        the volume's folder (default: RAILWAY_VOLUME_MOUNT_PATH on Railway, else /data)
-#   KIT_CLEAR_LOCKS      1: remove the lock files an earlier container left; 0: leave them. Not set:
-#                        remove them on Railway only, which mounts a volume in one container at a time
+#   KIT_CLEAR_LOCKS      1: remove every lock file a bot that is gone left on the volume; 0: leave them
+#                        all. Not set: all of them on Railway, which mounts a volume in one container at
+#                        a time; elsewhere only those this same container left
 #   KIT_ALLOW_NO_VOLUME  1: run devnet's example bots although the state folder is not a volume
-# start.sh and the bots read their own (KIT_SKIP_FAUCET, KIT_STORE_KEY_FILE, ...).
+#   KIT_STORE_KEY_FILE   the bots' own, the key that seals their state: refused when it is not on
+#                        the volume
+# start.sh and the bots read their own (KIT_SKIP_FAUCET, ...).
 #
 # MIT License (LICENSE): the kit comes as is, without warranty of any kind, and you use it at your
 # own risk.
@@ -102,6 +105,22 @@ fi
 case "${1:-}" in
   help | -h | --help) exec sh "$KIT_DIR/start.sh" "$NET" "$@" </dev/null ;;
 esac
+
+# The config the command's options name, as start.sh and the bots read them: the last --config,
+# and '' when there is none or it is empty.
+NAMED_CONFIG=''
+next=''
+for a in ${1+"$@"}; do
+  if [ "$next" = config ]; then
+    NAMED_CONFIG=$a
+    next=''
+    continue
+  fi
+  case "$a" in
+    --config) next=config ;;
+    --config=*) NAMED_CONFIG=${a#--config=} ;;
+  esac
+done
 
 # ── The volume ───────────────────────────────────────────────────────────────
 
@@ -183,6 +202,9 @@ link_state data
 # the file is deleted. Where a volume is mounted in one container at a time, and while no Node
 # process runs in this one, no bot holds a lock on it, and every lock file there is a leftover.
 # Railway mounts a volume that way; elsewhere only who runs the containers knows (KIT_CLEAR_LOCKS).
+# A lock that names this container's own host is a leftover anywhere while no Node process runs
+# here: the kit would take it over itself, unless another process now has the old bot's id, which
+# among a container's few process ids is common.
 # KIT_PROC_DIR is for the tests: a folder to read in place of /proc.
 PROC=${KIT_PROC_DIR:-/proc}
 
@@ -209,60 +231,96 @@ kit_locks() {
   done
 }
 
+# The host a lock file names.
+lock_host() { sed -n 's/.*"host":"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -n 1; }
+
 clear_old_locks() {
-  clear=${KIT_CLEAR_LOCKS:-}
-  if [ -z "$clear" ]; then
-    if [ -n "${RAILWAY_VOLUME_MOUNT_PATH:-}" ]; then clear=1; else clear=0; fi
-  fi
-  case "$clear" in
-    0 | 1) ;;
-    *) die "KIT_CLEAR_LOCKS is 1 or 0, not \"$clear\"" ;;
+  case "${KIT_CLEAR_LOCKS:-}" in
+    1) clear=all ;;
+    0) clear=none ;;
+    '') if [ -n "${RAILWAY_VOLUME_MOUNT_PATH:-}" ]; then clear=all; else clear=own; fi ;;
+    *) die "KIT_CLEAR_LOCKS is 1 or 0, not \"$KIT_CLEAR_LOCKS\"" ;;
   esac
   locks=$(kit_locks)
   [ -n "$locks" ] || return 0
-  if [ "$clear" = 0 ]; then
-    say "A bot's lock file is on $STATE:"
-    printf '%s\n' "$locks" | sed 's/^/  /'
-    say "If a bot runs on this volume in another container, leave it. If it is the leftover of a container that is gone, the kit refuses it here all the same (STORE_LOCKED, a bot on another machine): delete it, or start with KIT_CLEAR_LOCKS=1 where this volume is mounted in one container at a time."
-    return 0
-  fi
-  if node_runs; then
+  if [ "$clear" != none ] && node_runs; then
     say "A Node process runs in this container already, so the lock files on $STATE are left as they are."
     return 0
   fi
-  printf '%s\n' "$locks" | while IFS= read -r lock; do
-    if rm -f "$lock"; then
-      say "Removed $lock, the lock of a bot that ran in an earlier container. The bot resumes from its saved state."
+  here=$(uname -n 2>/dev/null || :)
+  left=''
+  # No pipe into this loop: it fills $left for the rows after it.
+  while IFS= read -r lock; do
+    [ -n "$lock" ] || continue
+    if [ "$clear" = all ] || { [ "$clear" = own ] && [ -n "$here" ] && [ "$(lock_host "$lock")" = "$here" ]; }; then
+      if rm -f "$lock"; then
+        say "Removed $lock, the leftover lock of a bot that is gone. The bot resumes from its saved state."
+      fi
+    else
+      left="$left  $lock
+"
     fi
-  done
+  done <<LOCKS
+$locks
+LOCKS
+  if [ -n "$left" ]; then
+    say "A bot's lock file is on $STATE:"
+    printf '%s' "$left"
+    say "If a bot runs on this volume in another container, leave it. If it is the leftover of a container that is gone, the kit refuses it here all the same (STORE_LOCKED, a bot on another machine): delete it, or start with KIT_CLEAR_LOCKS=1 where this volume is mounted in one container at a time."
+  fi
 }
 clear_old_locks
 
 # ── A config's own paths ─────────────────────────────────────────────────────
 
 # A bot's config names its key files and its data folder. They must be the volume's: ./keys/...
-# and ./data/... (through the links above) or a path under the volume. A data folder anywhere
-# else is on the container's own disk: the bot's offers, trades and swap secrets would end with
-# the container, and a start on the empty folder would know nothing of them. Prints why not.
-check_config() { # <file> [the network it must be for]
+# and ./data/... (through the links above) or a path under the volume, wherever a link on the way
+# leads. A data folder anywhere else is on the container's own disk: the bot's offers, trades and
+# swap secrets would end with the container, and a start on the empty folder would know nothing
+# of them. One helper, three questions:
+#   on_volume_check config <file> [network]  the config's paths (and its network); prints why not
+#   on_volume_check path <path>              one path
+#   on_volume_check data-dir <file>          prints where the config's data folder really is
+on_volume_check() {
   node -e '
     const fs = require("fs"), path = require("path");
-    const [file, kit, state, net] = process.argv.slice(1);
+    const [ask, arg, kit, state, net] = process.argv.slice(1);
     const no = (why) => { process.stdout.write(why + "\n"); process.exit(1); };
+    // Where a path really is: its nearest folder that exists, links followed, then the rest as written.
+    const real = (p) => {
+      let at = path.resolve(kit, p);
+      const rest = [];
+      for (;;) {
+        try { return path.join(fs.realpathSync(at), ...rest); } catch { /* not there yet */ }
+        const up = path.dirname(at);
+        if (up === at) return path.join(at, ...rest);
+        rest.unshift(path.basename(at));
+        at = up;
+      }
+    };
+    const volume = real(state);
+    const kept = (p) => { const r = real(p); return r === volume || r.startsWith(volume + path.sep); };
+    if (ask === "path") process.exit(kept(arg) ? 0 : 1);
     let c;
-    try { c = JSON.parse(fs.readFileSync(file, "utf8")); } catch { no("it is not JSON"); }
+    try { c = JSON.parse(fs.readFileSync(arg, "utf8")); } catch { no("it is not JSON"); }
     if (!c || typeof c !== "object" || Array.isArray(c)) no("it is not a JSON object");
+    if (ask === "data-dir") { if (typeof c.dataDir === "string" && c.dataDir) process.stdout.write(real(c.dataDir) + "\n"); process.exit(0); }
     if (net && c.network !== net) no("its \"network\" is not \"" + net + "\"");
-    const roots = [path.join(kit, "keys"), path.join(kit, "data"), state];
-    const kept = (p) => { const r = path.resolve(kit, p); return roots.some((d) => r === d || r.startsWith(d + path.sep)); };
     const named = { "keys.pha": c.keys && c.keys.pha, "keys.base": c.keys && c.keys.base, "dataDir": c.dataDir };
     for (const [key, value] of Object.entries(named)) {
       if (typeof value !== "string" || !value) no("it has no \"" + key + "\"");
       if (!kept(value)) no("its \"" + key + "\" (" + value + ") is not on the volume: use a path under ./keys or ./data, or under " + state);
     }
     if (typeof c.apiKeyFile === "string" && c.apiKeyFile && !kept(c.apiKeyFile)) no("its \"apiKeyFile\" (" + c.apiKeyFile + ") is not on the volume: use a path under ./keys, or under " + state);
-  ' "$1" "$KIT_DIR" "$STATE" "${2:-}"
+  ' "$1" "$2" "$KIT_DIR" "$STATE" "${3:-}"
 }
+check_config() { on_volume_check config "$1" "${2:-}"; }
+
+# The key that seals a bot's state (README, "Encrypting the store") must outlive the container too:
+# without it a sealed state cannot be read again.
+if [ -n "${KIT_STORE_KEY_FILE:-}" ] && ! on_volume_check path "$KIT_STORE_KEY_FILE"; then
+  die "KIT_STORE_KEY_FILE ($KIT_STORE_KEY_FILE) is not on the volume: the key that seals a bot's state would end with this container, and that state could not be read again. Keep it under $STATE, for example $STATE/keys/store.key"
+fi
 
 # ── Mainnet: the market bot's config, on the volume ──────────────────────────
 
@@ -278,28 +336,37 @@ link_config() {
 # KIT_MARKET_CONFIG onto the volume, whole or not at all. Prints why not.
 write_market_config() {
   new="$CONFIG.new.$$"
-  printf '%s\n' "$KIT_MARKET_CONFIG" >"$new"
+  if ! printf '%s\n' "$KIT_MARKET_CONFIG" >"$new" 2>/dev/null; then
+    rm -f "$new"
+    printf 'it could not be written to %s (is the volume full?)\n' "$STATE"
+    return 1
+  fi
   if why=$(check_config "$new" mainnet); then
-    mv -f "$new" "$CONFIG"
-    return 0
+    if mv -f "$new" "$CONFIG" 2>/dev/null; then
+      return 0
+    fi
+    why="it could not be put in the place of $CONFIG"
   fi
   rm -f "$new"
-  printf '%s\n' "$why"
+  printf '%s\n' "${why:-it could not be checked (is Node there?)}"
   return 1
 }
 
-# Whether start.sh's command runs the market bot on its default config, market.mainnet.json.
+# Whether start.sh's command runs the market bot on its default config, market.mainnet.json:
+# the market bot with no --config (or an empty one, or that very file), and not its help.
 uses_market_config() { # start.sh's words after the network
   case "${1:-demo}" in
     demo | start | run | setup | dry-run | dryrun) return 0 ;;
     market)
-      shift
-      for a in ${1+"$@"}; do
+      for a in "$@"; do
         case "$a" in
-          --help | -h | --config | --config=*) return 1 ;;
+          --help | -h) return 1 ;;
         esac
       done
-      return 0
+      case "$NAMED_CONFIG" in
+        '' | market.mainnet.json | ./market.mainnet.json | "$KIT_DIR/market.mainnet.json" | "$CONFIG") return 0 ;;
+      esac
+      return 1
       ;;
   esac
   return 1
@@ -340,6 +407,15 @@ mainnet_config() {
     die "the market bot's config, $CONFIG, cannot be used here: $why. No bot was started"
   fi
   link_config
+  # start.sh looks for open offers and trades in the data folder this config names, and nowhere else.
+  used=$(on_volume_check data-dir "$CONFIG" || :)
+  for store in "$STATE"/data/*/mainnet; do
+    [ -d "$store" ] || continue
+    folder=$(CDPATH='' cd -- "$store/.." && pwd -P) || continue
+    if [ -n "$used" ] && [ "$folder" != "$used" ]; then
+      say "Note: $folder holds a mainnet bot's state, and this config's dataDir is another folder. Offers and trades still open there are not looked at, and not finished, by this start."
+    fi
+  done
 }
 
 # ── Hold: no bot, for a shell ────────────────────────────────────────────────
@@ -347,9 +423,15 @@ mainnet_config() {
 if [ "${KIT_HOLD:-}" = 1 ]; then
   say "KIT_HOLD=1: no bot is started, and none sends a lock, a claim or a refund while it is set. The container keeps running, so that you can open a shell in it (on Railway: railway ssh)."
   say "The kit is in $KIT_DIR, its keys in $STATE/keys and the bots' state in $STATE/data. Remove KIT_HOLD and deploy again to start the bots."
-  # The config a dry run typed in that shell reads is the one the next start will run.
-  if [ "$NET" = mainnet ] && [ -n "${KIT_MARKET_CONFIG:-}" ]; then
-    if why=$(write_market_config); then
+  # The config a dry run typed in that shell reads is the one the next start will run. Only onto a
+  # volume that has had its first start: that start makes the market bot's key pair, and only while
+  # there is no config.
+  if [ -n "${KIT_MARKET_CONFIG:-}" ]; then
+    if [ "$NET" != mainnet ]; then
+      say "KIT_MARKET_CONFIG is not written: the network is not mainnet (KIT_NETWORK)."
+    elif [ ! -f "$CONFIG" ]; then
+      say "KIT_MARKET_CONFIG is not written yet: this volume has no market.mainnet.json of a first start."
+    elif why=$(write_market_config); then
       say "Wrote the market bot's config, $CONFIG, from KIT_MARKET_CONFIG."
     else
       say "KIT_MARKET_CONFIG cannot be the market bot's config: $why. The config on the volume was left as it was."
@@ -360,7 +442,7 @@ if [ "${KIT_HOLD:-}" = 1 ]; then
       link_config
     fi
   elif [ "$NET" = mainnet ]; then
-    say "There is no market.mainnet.json on the volume yet. One made in this shell (sh start.sh mainnet setup) stays in this container: a start without KIT_HOLD makes it on the volume."
+    say "There is no market.mainnet.json on the volume yet. A start without KIT_HOLD makes it, and the market bot's key pair with it; one made in this shell (sh start.sh mainnet setup) stays in this container."
   fi
   # A sleep in the background, so that a SIGTERM ends the wait at once: it takes the sleep with it.
   nap=''
@@ -381,28 +463,21 @@ fi
 if [ "$NET" = mainnet ]; then
   if uses_market_config ${1+"$@"}; then
     mainnet_config
-  elif [ -n "${KIT_MARKET_CONFIG:-}" ]; then
-    say "KIT_MARKET_CONFIG is not used: this command does not run the market bot on market.mainnet.json."
+  else
+    if [ -n "${KIT_MARKET_CONFIG:-}" ]; then
+      say "KIT_MARKET_CONFIG is not used: this command does not run the market bot on market.mainnet.json."
+    fi
+    # The volume's config is still where the kit's folder has it, for whatever names it.
+    if [ -f "$CONFIG" ] && { [ -L "$KIT_DIR/market.mainnet.json" ] || [ ! -e "$KIT_DIR/market.mainnet.json" ]; }; then
+      link_config
+    fi
   fi
 fi
 
 # A config the command itself names (seller --config <file>, market --config <file>): its paths too.
-named_config=''
-next=''
-for a in ${1+"$@"}; do
-  if [ "$next" = config ]; then
-    named_config=$a
-    next=''
-    continue
-  fi
-  case "$a" in
-    --config) next=config ;;
-    --config=*) named_config=${a#--config=} ;;
-  esac
-done
-if [ -n "$named_config" ] && [ -f "$named_config" ]; then
-  if ! why=$(check_config "$named_config"); then
-    die "the config $named_config cannot be used here: $why. No bot was started"
+if [ -n "$NAMED_CONFIG" ] && [ -f "$NAMED_CONFIG" ]; then
+  if ! why=$(check_config "$NAMED_CONFIG"); then
+    die "the config $NAMED_CONFIG cannot be used here: $why. No bot was started"
   fi
 fi
 
@@ -410,11 +485,12 @@ fi
 
 # A start fails where a running bot would have carried on: the preflight needs the board and both
 # chains to answer. The platform starts a container that stopped on an error again, ten times on
-# Railway, and then no more. So a start that comes within half a minute of the last one waits
+# Railway, and then no more. So a start that comes within five minutes of the last one waits
 # first, longer each time (5 s, then 10, 20, 40, 80, 160, and 300 from then on): those ten starts
-# then last about 25 minutes and not seconds, and an outage that long passes. A start after a run
-# of half a minute or more waits for nothing. (A recurring order of the config is still sent at
-# every one of those starts.)
+# then last 25 minutes or more and not seconds, and an outage that long passes. Five minutes, so
+# that a start which takes long to fail (an RPC that accepts and does not answer) counts as well.
+# A start after a run of five minutes or more waits for nothing. (A recurring order of the config
+# is still sent at every one of those starts.)
 STAMP=$STATE/.last-start
 
 # A count this shell can reckon with: digits, no leading zero, not too long.
@@ -435,7 +511,7 @@ wait_if_restarting() {
   fi
   is_count "$last" || last=0
   is_count "$row" || row=0
-  if [ "$last" -gt 0 ] && [ "$now" -ge "$last" ] && [ $((now - last)) -lt 30 ]; then
+  if [ "$last" -gt 0 ] && [ "$now" -ge "$last" ] && [ $((now - last)) -lt 300 ]; then
     row=$((row + 1))
     case "$row" in
       1) pause=5 ;;
