@@ -126,10 +126,11 @@ A container is replaced at every deploy, and only its volume stays. So
 | Variable | Value | Meaning |
 |---|---|---|
 | `KIT_NETWORK` | `devnet` or `mainnet` | Where the bots run. Not set: devnet, unless the volume holds a mainnet bot's keys or state. Then the start is refused: a variable that was lost does not turn a mainnet bot into devnet's examples. |
-| `KIT_ALLOW_MAINNET` | `1` | Mainnet only: your yes. With it, every start, deploy and restart starts the market bot with real funds, without a dry run and without a question (README, "On mainnet"). Set it last. Without it no bot starts at all, also not to finish open trades. While it is set the entrypoint makes no new key pair: a start on a volume with no config and no mainnet key is refused ("One service, one volume, one bot" below). |
-| `KIT_MARKET_CONFIG` | the market bot's whole config, as JSON | Mainnet only. Written to `/data/market.mainnet.json` at each start (the log says "Wrote the market bot's config"), also under `KIT_HOLD=1` once the volume has had its first start. Without it, the file on the volume is used as it is. One that is not the whole config, that names key files or a data folder off the volume, or that names another `dataDir` than the config it replaces while the bot's saved state is in that folder, is refused: the config on the volume stays as it was, and no bot starts. |
+| `KIT_ALLOW_MAINNET` | `1` | Mainnet only: your yes. With it, every start, deploy and restart starts the market bot with real funds, without a dry run and without a question (README, "On mainnet"). Set it last. Without it no bot starts at all, also not to finish open trades. While it is set the entrypoint makes no key pair: a start that would have to make one (a volume with no `market.mainnet.json` and without both of the market bot's key files) is refused ("One service, one volume, one bot" below). |
+| `KIT_MARKET_CONFIG` | the market bot's whole config, as JSON | Mainnet only. Written to `/data/market.mainnet.json` at each start (the log says "Wrote the market bot's config"), also under `KIT_HOLD=1` once the volume has had its first start. Without it, the file on the volume is used as it is. One that is not the whole config, that names key files or a data folder off the volume, or that would take the bot away from its saved state (another `dataDir` than the config it replaces, while that folder holds a bot's state; or, with no config to compare with, a `dataDir` without a state while another folder on the volume has one), is refused: the config on the volume stays as it was, and no bot starts. |
 | `KIT_START_ARGS` | for example `dry-run` | What follows the network on `start.sh`'s command line: `dry-run`, `setup`, `seller`, `buyer`. Split at blanks. Empty: both example bots on devnet, the market bot on mainnet. `market --config /data/other.json` runs a config you put on the volume yourself, with its own key files: `KIT_MARKET_CONFIG`, the first start's setup and the steps of "On mainnet" are for `market.mainnet.json` only. |
 | `KIT_HOLD` | `1` | Start no bot and keep the container running, to open a shell in it ("A shell, and the files on the volume" below). |
+| `KIT_PROBE` | `1` | Start no bot. The container says whether another one is writing to the volume, then writes there once a second itself until Railway ends it: two deploys with it show whether Railway runs two containers on the volume at a time ("Check it once on your own project" below). |
 | `KIT_SKIP_FAUCET` | `1` | Devnet: never ask the faucet on a start (`start.sh` reads it). |
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `30` | Railway's own: how long a container has between SIGTERM and SIGKILL. Railway's default is 0 ("What a deploy does to a running bot" below). |
 | `KIT_STATE_DIR` | a path | The volume's folder, if it is not `/data`. On Railway the entrypoint takes the volume's mount path from `RAILWAY_VOLUME_MOUNT_PATH`, which Railway sets. |
@@ -218,12 +219,17 @@ Railway's pages say a sealed variable is not copied
 has no yes. (A sealed value can be set anew, but not shown or unsealed.)
 
 - On an empty volume the entrypoint refuses to start it: "this volume has
-  no market.mainnet.json and no mainnet key, and KIT_ALLOW_MAINNET=1 is set
-  already". A bot's keys and the state of its open trades are on the volume
-  it ran on, and its funds are at those keys' addresses: a new key pair is
-  not that bot. You meet the same message after you replaced or wiped the
-  bot's volume: attach its own volume again, or put a copy of its keys and
-  state on the new one under `KIT_HOLD=1`.
+  no market.mainnet.json and no market bot's key pair ... and
+  KIT_ALLOW_MAINNET=1 is set already". A bot's keys and the state of its
+  open trades are on the volume it ran on, and its funds are at those
+  keys' addresses: a new key pair is not that bot. You meet the same
+  message after you replaced or wiped the bot's volume. Attach its own
+  volume again. Or, under `KIT_HOLD=1`, put a copy of its two key files
+  and of its data folder on the new one, where its config names them
+  (`/keys/mainnet/market-pha.json`, `/keys/mainnet/market-base.json` and
+  `/data/market` for the template's names): the next start then finds the
+  key files that `KIT_MARKET_CONFIG` names, makes nothing, and writes the
+  variable as the volume's config.
 - With a copy of the volume's files (Railway's PR environments can be set
   to copy volume data) the copy is the same bot a second time, on the same
   keys and the same trades. Nothing in the kit can see that from inside
@@ -328,10 +334,11 @@ open: the start that finishes the trades needs it.
   finishes those trades. Restart it later (`railway restart`): nothing is
   left open once a start ends with "Dry run done" and then "lists no
   offers, bids or orders yet, so the market bot has nothing to do", the
-  container exits without an error, and no row of that start begins with
-  `Note:`, the entrypoint's word for a bot's state in a folder the config
-  does not name. A start that ends with an error, or a deployment that is
-  Crashed, shows nothing of the kind.
+  container exits without an error, and no row of that start says "holds
+  a mainnet bot's state": that is the entrypoint's note on a state in a
+  folder the config does not name, wherever on the volume. A start that
+  ends with an error, or a deployment that is Crashed, shows nothing of
+  the kind.
 
 Remove the deployment then (its menu, or `railway down`), and move the
 funds off the bot's addresses only after that.
@@ -420,10 +427,12 @@ Railway, and can only be put back into the same project. Do not put one
 back over a bot that has traded since: it brings yesterday's state back,
 and yesterday's `market.mainnet.json`.
 
-To move a key pair onto a new volume, upload the two files to
+To move a key pair onto a new volume, upload both of its files to
 `/keys/mainnet/` (or `/keys/` for the devnet bots) before the first start
 with `KIT_NETWORK` set, or under `KIT_HOLD=1`: `start.sh` never replaces a
-key file that is there.
+key file that is there, and with only one of the two it stops and makes
+none. A bot that has traded needs its data folder as well ("One service,
+one volume, one bot" above).
 
 ## Check it once on your own project
 
@@ -444,22 +453,37 @@ does what the guide says. Make them before the mainnet steps.
    stops on `STORE_LOCKED` instead, set `KIT_CLEAR_LOCKS=1`.
 3. **One container at a time.** The entrypoint removes those locks because
    Railway says it stops the old container before it starts the new one.
-   See it once. Set `KIT_HOLD=1` and deploy. In a shell (`railway ssh`)
-   start a clock on the volume and leave it running: `while :; do date +%s
-   > /data/beat; sleep 1; done`. Press Redeploy; the shell ends with its
-   container. In a shell in the new container, `cat /data/beat` is the old
-   container's last second, and `date -d "$(ps -o lstart= -p 1)" +%s` the
-   second this one started. The first must be the smaller one, by a few
-   seconds or more. If it is not, two containers had the volume at once:
-   set `KIT_CLEAR_LOCKS=0`, delete leftover lock files by hand when a
-   start names them, and ask Railway. An old deployment whose log ends
-   with `STORE_LOCK_LOST` is the same finding. Afterwards delete
-   `/data/beat` and remove `KIT_HOLD`.
-4. **A clean stop.** Set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30` and
-   redeploy over the running bots. The old deployment's log must end with
-   "Both bots stopped": then Railway's SIGTERM reaches the bots. (Checks 2
-   and 4 need bots that run. While the board has P2P off on devnet, as on
-   the day this guide was written, the bots stop at their preflight, and
+   See it, with the draining seconds you mean to use
+   (`RAILWAY_DEPLOYMENT_DRAINING_SECONDS`, or none). Set `KIT_PROBE=1` and
+   deploy: the container starts no bot and writes a mark to the volume
+   once a second, also after Railway's SIGTERM, as a bot that is finishing
+   a trade goes on. When its log says "Writing to /data/.probe once a
+   second now", press Redeploy. The new deployment's log then has one of
+   two rows:
+   - "ONE CONTAINER AT A TIME: the probe before this one ... wrote its
+     last mark 9 s before this container started, and none since." The
+     old container was gone first, and the number is how long the volume
+     had none.
+   - "TWO CONTAINERS AT ONCE: another container ... went on writing to
+     this volume for 30 s after this one had started." A bot that is
+     replaced would run beside its successor for that long, and the
+     entrypoint would take its lock away. Set `KIT_CLEAR_LOCKS=0`: a
+     start then names a leftover lock and the kit refuses it, until you
+     delete the file by hand. Ask Railway, and try the check without
+     draining seconds. Later, an old deployment whose log ends with
+     `STORE_LOCK_LOST` is the same finding.
+
+   Remove `KIT_PROBE` afterwards. With draining seconds set, a deploy
+   over the probe takes that long, as it does over a bot with a trade
+   under way.
+4. **A clean stop.** Set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`, deploy,
+   and then redeploy over the running bots. The old deployment's log must
+   show "Stopping: the bots cancel their offers and finish their running
+   trades, then exit.", and each bot's "Stopping: no new offers or
+   takes": then Railway's SIGTERM reaches the bots. "Both bots stopped"
+   follows only when no trade outlasts the 30 seconds. (Checks 2 and 4
+   need bots that run. While the board has P2P off on devnet, as on the
+   day this guide was written, the bots stop at their preflight, and
    these two checks have to wait.)
 5. **A start that fails.** A devnet start fails while the board has P2P
    off there, and so does any start with an RPC that does not answer. When
@@ -497,8 +521,12 @@ commands are the ones you will need for the mainnet keys.
   its RPC says about the chain. Most providers put your key in the
   address. Keep such a config out of Railway's variables: leave
   `KIT_MARKET_CONFIG` unset and, once the first start has made the keys,
-  put the config on the volume as a file (`railway volume files upload
-  market.mainnet.json /market.mainnet.json`, then `railway restart`).
+  put the config on the volume as a file, then restart the bot (`railway
+  restart`):
+
+  ```sh
+  railway volume files upload market.mainnet.json /market.mainnet.json
+  ```
 - **The kit's own bots.** The image runs `start.sh`'s commands: the two
   example bots and the market bot. A bot script of your own is not for a
   Custom Start Command, which would run it without the volume test, the
@@ -537,11 +565,11 @@ commands are the ones you will need for the mainnet keys.
 | `KIT_ALLOW_NO_VOLUME=1 is for devnet's test tokens` | Mainnet does not start without a volume, whatever is set: a key made there would be lost with what was sent to it. |
 | `the network is not named, and this volume holds a mainnet bot's keys or state` | `KIT_NETWORK` is not set on a volume that a mainnet bot has used. Set `KIT_NETWORK=mainnet` to run that bot. |
 | `The last start was 4 s ago (start 2 in a row): waiting 5 s before this one.` | The container was started again within five minutes of its last start. Mostly the bot stopped on an error, whose reason is in the lines before; a deploy or a restart by hand does the same. The wait is step 4 of "What the image does". Before a deploy you make on purpose soon after the last one, delete `/data/.last-start` while the bot runs (`railway ssh -- rm /data/.last-start`): the next start then waits for nothing. |
-| `this volume has no market.mainnet.json and no mainnet key, and KIT_ALLOW_MAINNET=1 is set already` | The volume is empty, and the yes is given: the entrypoint makes no new key pair then. For a new bot, remove `KIT_ALLOW_MAINNET` and take the steps of "On mainnet" from the first. For a bot that has run before, this is not its volume ("One service, one volume, one bot"). No key was made. |
+| `this volume has no market.mainnet.json and no market bot's key pair (...), and KIT_ALLOW_MAINNET=1 is set already` | The volume has no config and not both of the market bot's key files, and the yes is given: the entrypoint makes no key pair then. For a new bot, remove `KIT_ALLOW_MAINNET` and take the steps of "On mainnet" from the first. For a bot that has run before, its keys are not on this volume, or not where its config names them ("One service, one volume, one bot"). No key was made. |
 | `STORE_LOCKED: ... on <another host>` | A lock file of another container was left in place: off Railway `KIT_CLEAR_LOCKS=1` is not set, or it is `0`, or a Node process ran in the container when the entrypoint looked, or a bot does run on this volume in another container. With no bot running anywhere on the volume, delete the `.lock` file the message names (on the volume it is `data/<bot>/<network>/.lock`). On Railway the entrypoint removes such a file itself and says "Removed ..., the leftover lock of a bot that is gone"; it knows Railway by `RAILWAY_VOLUME_MOUNT_PATH`, so if a deploy's first rows do not say that, set `KIT_CLEAR_LOCKS=1`. |
 | `STORE_LOCKED: ... is in use by process ...` with no host | Another copy of that bot runs in the same container: a dry run typed in a shell while the bot runs, for one. Stop it first. |
 | `start.sh: on mainnet the market bot starts only once you type yes` | `KIT_ALLOW_MAINNET=1` is not set, and the config lists offers, or lists nothing while the bot's saved state still holds offers or trades. Look at a dry run (`KIT_START_ARGS=dry-run`), then set it. |
-| `KIT_MARKET_CONFIG cannot be the market bot's config: ...` | The variable does not hold the whole config, or names key files or a data folder that are not the volume's, or names another data folder than the one the bot's saved state is in. The words after the colon say which. The config on the volume was left as it was, and no bot was started. |
+| `KIT_MARKET_CONFIG cannot be the market bot's config: ...` | The variable does not hold the whole config, or names key files or a data folder that are not the volume's, or names a data folder without a saved state while the bot's state is in another one. The words after the colon say which, and name the folders. The config on the volume was left as it was, and no bot was started. |
 | `the market bot's config, /data/market.mainnet.json, cannot be used here: ...` or `the config <file> cannot be used here: ...` | The same, for the file on the volume, or for a config the command names with `--config`. |
 | `KIT_STORE_KEY_FILE (...) is not on the volume` | The key that seals the bots' state must be a file on the volume, for example `/data/keys/store.key`. |
 | `preflight FAIL board: P2P is off on ...` | The board does not run P2P on that network now. Nothing to change on Railway: deploy again once it does. |
