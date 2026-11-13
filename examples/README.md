@@ -48,10 +48,11 @@ npm run buyer
    `npm ci --ignore-scripts` installs exactly the versions pinned in the
    kit's `package-lock.json` and lets no package run its own install script,
    which matters on a machine that holds your keys; `../README.md` ("Get the
-   kit") says what gets installed. The site's file is still the kit's
-   version 0.1.4: it has the two example bots, but not the market bot of
-   "Mainnet" below, which comes only with the kit's repository
-   (`../README.md`, "Get the kit").
+   kit") says what gets installed. The site's file can be older than the
+   kit's repository (`package.json` names its version): its version 0.1.4
+   has the two example bots, but not the market bot of "Mainnet" below,
+   which comes with the kit's repository and with a site file of version
+   0.3.0 or later (`../README.md`, "Get the kit").
 2. **Make keys.** `new-keys.ts` writes a key pair for each bot into `keys/`
    (`seller-pha.json`, `seller-base.json`, `buyer-pha.json`,
    `buyer-base.json`), each file mode 0600, and prints only the addresses. It
@@ -73,7 +74,9 @@ everything the bot would do and sends nothing (see "Dry run" below).
 Both run the same runner (`seller-bot.ts`; `buyer-bot.ts` starts it with the
 buyer's config). On start a bot reads its config, runs the kit's preflight
 (pins, the escrow's code, both chains, its balances, the clock), and stops if
-a check that its trading needs fails. Then:
+a check that its trading needs fails, or if the escrow does not take a token
+its config trades on this network yet (`preflight off escrow C: ...`; such a
+token does not stop a bot that does not trade it). Then:
 
 | | Seller (`seller.devnet.example.json`) | Buyer (`buyer.devnet.example.json`) |
 |---|---|---|
@@ -204,11 +207,15 @@ and name any check a real start would stop on.
 
 ## Upgrading the kit
 
-A kit cloned from the kit's repository (it has `start.sh`) upgrades with
-`git pull` in its folder, which leaves `keys/`, `data/` and
-`market.mainnet.json` as they are (`../README.md` says how, and how with the
-ZIP). The steps below are for the file from the Saturn site, which is still
-0.1.4: following them from a newer kit would take it back to 0.1.4.
+A kit from the kit's repository upgrades another way. A cloned kit (its
+folder holds a `.git` folder) upgrades with `git pull` in its folder, which
+leaves `keys/`, `data/` and `market.mainnet.json` as they are; a kit from the
+repository's ZIP (its folder is `p2pbotkit-main`) with a new ZIP
+(`../README.md`, "Where things are", says how for both). `start.sh` does not
+tell them apart: the site's file has it too from 0.3.0 on. The steps below
+are for the file from the Saturn site (it unpacks into
+`saturn-p2p-bot-kit/`): following them from a kit that is newer than the
+site's file would take it back to the site's version.
 
 Your keys (`keys/`) and each bot's state (its `dataDir`, `data/<bot>` in the
 examples) are the only files that matter. `data/` holds the swap secrets and

@@ -1068,8 +1068,11 @@ class FakeKit {
 
   readonly base = { readFunds: async () => ({ usdc: this.usdc, allowance: 0n, eth: 10n ** 18n }) };
 
+  /** The preflight's items; the report is ok when every item is. */
+  preflightItems: Array<{ name: string; ok: boolean; text: string; code?: string }> = [{ name: 'pins', ok: true, text: 'pinned' }];
+
   async preflight() {
-    return { network: this.network, ok: true, address: this.address, items: [{ name: 'pins', ok: true, text: 'pinned' }], balances: { pha: null, base: null }, clockSkewS: 0 };
+    return { network: this.network, ok: this.preflightItems.every((i) => i.ok), address: this.address, items: this.preflightItems, balances: { pha: null, base: null }, clockSkewS: 0 };
   }
 
   async postOffer(o: OfferInput): Promise<LocalOffer> {
@@ -1192,7 +1195,7 @@ describe('the example configs', () => {
     bad({ acceptAfterSecs: 0 }, /unknown key "acceptAfterSecs"/);
     bad({ network: 'testnet' }, /network is "devnet" or "mainnet"/);
     bad({ offers: [{ symbol: 'TAZ', total: 30, min: '1', max: '5', price: '1.08' }] }, /offers\[0\]\.total is required, as text/);
-    bad({ offers: [{ symbol: 'taz', total: '30', min: '1', max: '5', price: '1.08' }] }, /offers\[0\]\.symbol is TAZ, SOUL, KCAL or RA/);
+    bad({ offers: [{ symbol: 'taz', total: '30', min: '1', max: '5', price: '1.08' }] }, /offers\[0\]\.symbol is C, RA, TAZ, SOUL or KCAL/);
     bad({ offers: [{ symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08', follow: { offsetBps: 200, limitPrice: '1' } }] }, /exactly one/);
     bad({ offers: [{ symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.0800001' }] }, /more than 6 decimal places/);
     bad({ bids: [{ symbol: 'TAZ', total: '3', min: '5', max: '6', price: '1.06' }] }, /bids\[0\]:/);
@@ -1442,6 +1445,32 @@ describe('the runner (seller-bot.ts) on a fake kit', () => {
     assert.equal(resolvePolicy(kit2.policy, 'devnet').claimWatchS, 60);
     b.signals.emit('SIGINT');
     assert.equal(await drive(vt, b.p), 0);
+  });
+
+  test('a token the escrow does not take on this network (TOKEN_OFF) stops the start only when the config trades it', async () => {
+    const off = (sym: string) => ({ name: `escrow ${sym}`, ok: true, code: 'TOKEN_OFF', text: `The escrow takes no locks of ${sym} on this network, so the kit cannot trade it here. Other tokens are not affected.` });
+    const vt = new VTime();
+    // The seller's config trades TAZ and RA, not C: an off C is printed and the bot starts.
+    const kit = new FakeKit(vt.now);
+    kit.preflightItems = [{ name: 'pins', ok: true, text: 'pinned' }, off('C')];
+    const r = await onFakeKit('seller', kit, vt);
+    await until(vt, () => kit.count('run') >= 1, 'the start');
+    assert.ok(r.out.lines.some((l) => l.includes('] preflight off escrow C: The escrow takes no locks of C')), r.out.lines.join('\n'));
+    r.signals.emit('SIGINT');
+    assert.equal(await drive(vt, r.p), 0);
+    // An off TAZ, which the config trades, stops the start before anything is posted.
+    const kit2 = new FakeKit(vt.now);
+    kit2.preflightItems = [{ name: 'pins', ok: true, text: 'pinned' }, off('TAZ')];
+    const r2 = await onFakeKit('seller', kit2, vt);
+    assert.equal(await drive(vt, r2.p), 1);
+    assert.ok(r2.out.lines.some((l) => l.includes('] preflight off escrow TAZ:')), r2.out.lines.join('\n'));
+    assert.ok(r2.out.lines.some((l) => /\] Not starting: escrow TAZ \(above\)/.test(l)), r2.out.lines.join('\n'));
+    assert.deepEqual(kit2.calls.map((c) => c.fn), ['close'], 'nothing posted, taken or run');
+    // A failed escrow item of a token the config trades stops it too, as before; one it does not trade does not.
+    const kit3 = new FakeKit(vt.now);
+    kit3.preflightItems = [{ name: 'escrow RA', ok: false, text: 'New locks are paused.' }];
+    assert.equal(await drive(vt, (await onFakeKit('seller', kit3, vt)).p), 1);
+    assert.deepEqual(kit3.calls.map((c) => c.fn), ['close']);
   });
 
   test('the first Ctrl-C stops posting and taking, cancels the offers, leaves new takes unaccepted, and finishes the running trades before it exits', async () => {

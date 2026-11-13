@@ -28,7 +28,7 @@ import { SafetyError } from '../src/errors.js';
 import { makeSecretRecord, hexToDecimal, decimalToHex, hashOfSecret, newControlToken } from '../src/codec.js';
 import { P2P_CONFIG, PHA_HASH_VECTORS, P2P_TOKENS, PHA_LOCK_GAS, phaPinned, baseDeployed } from '../src/pins.js';
 import { PhaReader, type PhaRpc, type PhaCall, type PhaBalance, type PhaTxState } from '../src/pha.js';
-import { BaseReader, SATURN_SWAP_ABI, USDC_ABI, pinnedDomainSeparator, sendRefused, notSendable, feesFor, replacementFees, bumpFee, type BaseClient, type BaseBlock, type BaseLog, type BaseReceipt, type ReadCall, type TxCall, type Hex } from '../src/base.js';
+import { BaseReader, SATURN_SWAP_ABI, USDC_ABI, LOG_CHUNK, LOG_STEPS, SEARCH_WIDEN_MAX, isRangeError, isRateLimit, isRateLimitCode, pinnedDomainSeparator, sendRefused, notSendable, feesFor, replacementFees, bumpFee, type BaseClient, type BaseBlock, type BaseLog, type BaseReceipt, type ReadCall, type TxCall, type Hex } from '../src/base.js';
 import * as checks from '../src/checks.js';
 import { CHECK_CODES, type CheckDeps, type Problem, type TradeReader } from '../src/checks.js';
 import { createSigner, SignRefusal, type Signer } from '../src/signer.js';
@@ -237,20 +237,33 @@ class FakeBase implements BaseClient {
   applyApprove = true;
   nextStatus: 'success' | 'reverted' | null = 'success';
   failRead = new Set<string>();
+  /** Seconds between two blocks: 0.2 on Base now, 2 before (the kit's searches must not depend on it). */
+  blockSeconds = 2;
 
   constructor(readonly clock: () => number) {}
 
   #time(): number { return Math.floor(this.clock() / 1000) + this.skew; }
+
+  /** Unix time (whole seconds, as a block's timestamp) of block `n`, counted back from the head at this.blockSeconds a block. */
+  timeOf(n: bigint): number {
+    const ms = Math.round(this.blockSeconds * 1000);
+    return this.#time() - Math.ceil((Number(this.head - n) * ms) / 1000);
+  }
+
+  /** The block mined `seconds` before the head (at this.blockSeconds a block). */
+  blockBack(seconds: number): bigint {
+    return this.head - BigInt(Math.round(seconds / this.blockSeconds));
+  }
 
   async chainId(): Promise<number> { return 84532; }
 
   async block(at: { tag?: 'latest' | 'safe'; number?: bigint } = {}): Promise<BaseBlock> {
     if (this.failRead.has('block')) throw new Error('fake base: block fails');
     if (at.number != null) {
-      return { number: at.number, timestamp: BigInt(this.blockTimes.get(at.number) ?? this.#time() - Number(this.head - at.number) * 2), baseFeePerGas: this.baseFee };
+      return { number: at.number, timestamp: BigInt(this.blockTimes.get(at.number) ?? this.timeOf(at.number)), baseFeePerGas: this.baseFee };
     }
     const n = at.tag === 'safe' ? this.head - 10n : this.head;
-    return { number: n, timestamp: BigInt(this.#time() - Number(this.head - n) * 2), baseFeePerGas: this.baseFee };
+    return { number: n, timestamp: BigInt(this.timeOf(n)), baseFeePerGas: this.baseFee };
   }
 
   #swapAt(h: string, sender: string, blockNumber: bigint | undefined) {
@@ -820,6 +833,11 @@ describe('D. the seller\'s lock', () => {
   test('23: new P2P locks are paused on Phantasma (getPaused reads 1)', async () => {
     const { p } = await one((w) => { w.pha.paused = true; }, 'ESCROW_PARAMS');
     assert.match(p.text, /paused/);
+  });
+  test('23: a token the escrow takes no locks of on this network (its largest lock reads 0) is refused before anything is signed', async () => {
+    const { w, p } = await one((w) => { w.pha.bounds.TAZ = { min: w.pha.bounds.TAZ!.min, max: 0n }; }, 'ESCROW_PARAMS');
+    assert.match(p.text, /TAZ is not enabled in the P2P escrow on Phantasma right now, so it cannot be locked\. Nothing was locked\./);
+    assert.equal(w.pha.sent.length + w.base.sent.length, 0);
   });
   test('24: SaturnSwap\'s fee is above the trade\'s', async () => void await one((w) => { w.base.feeBps = 60; }, 'SELLER_BASE'));
   test('25: this clock is off from Base\'s newest block', async () => void await one((w) => { w.base.skew = 400; }, 'CLOCK_SKEW'));
@@ -1454,5 +1472,358 @@ describe('mainnet while its pins are empty (a release before the launch)', () =>
     assert.equal(r.ok, false);
     if (!r.ok) assert.ok(['BASE_NOT_DEPLOYED', 'NOT_PINNED'].includes(r.problem.code), r.problem.code);
     assert.equal(pha.reads + base.reads + pha.sent.length + base.sent.length, 0);
+  });
+});
+
+// ── Base log searches: Base's 200 ms blocks, range refusals, rate limits ───
+
+type LogQuery = { address: Hex; event: AbiEvent; args: Record<string, unknown>; fromBlock: bigint; toBlock: bigint };
+
+/**
+ * A reader over a fake Base at `bs` seconds a block whose head is `head`,
+ * recording every log request; `fail` answers an error for a request the
+ * RPC refuses (null: it serves it).
+ */
+function searchOf(bs: number, head = 1_000_000n, fail: (q: LogQuery, n: number) => Error | null = () => null) {
+  const base = new FakeBase(() => T0 * 1000);
+  base.blockSeconds = bs;
+  base.head = head;
+  const asked: Array<{ from: bigint; to: bigint }> = [];
+  const serve = base.logs.bind(base);
+  base.logs = async (q) => {
+    asked.push({ from: q.fromBlock, to: q.toBlock });
+    const e = fail(q, asked.length);
+    if (e) throw e;
+    return serve(q);
+  };
+  const lowest = () => asked.reduce((m, a) => (a.from < m ? a.from : m), base.head);
+  return { base, asked, lowest, reader: new BaseReader(base, 'devnet') };
+}
+
+/** The requests of one search cover top down to bottom, each block once, in requests of at most `most` blocks. */
+function coversOnce(asked: Array<{ from: bigint; to: bigint }>, top: bigint, bottom: bigint, most: bigint): void {
+  let next = top;
+  for (const a of asked) {
+    assert.equal(a.to, next, 'each request goes on just below the one before');
+    assert.ok(a.to - a.from + 1n <= most, `a request of ${a.to - a.from + 1n} blocks`);
+    next = a.from - 1n;
+  }
+  assert.equal(next, bottom - 1n, 'down to the bottom');
+}
+
+/** An RPC that refuses a request for more than `most` blocks. */
+const refuseOver = (most: bigint) => (q: LogQuery) => (q.toBlock - q.fromBlock + 1n > most
+  ? Object.assign(new Error(`block range too large: at most ${most} blocks`), { code: -32000 }) : null);
+
+describe('Base log searches reach back by time, whatever Base\'s block time', () => {
+  const NO_RECEIPT_TX = '0x' + 'ab'.repeat(32);
+
+  for (const bs of [0.2, 2]) {
+    test(`a buyer's lock mined 20 minutes back, with no receipt, is found (blocks ${bs} s apart)`, async () => {
+      const { base, reader } = searchOf(bs);
+      const block = base.blockBack(1200);
+      base.addSwap(H, { token: USDC, deadline: T0 + 900, feeBps: 50, state: 1, sender: B_B, claimer: KB, amount: USDC_AMT }, block, base.timeOf(block));
+      // The Phantasma lock was made a minute before it.
+      const at = await reader.readLockedAt(H, B_B, { txHash: NO_RECEIPT_TX, fromTime: T0 - 1260 });
+      assert.ok(at, 'found');
+      assert.equal(at.blockNumber, block);
+      assert.equal(at.time, T0 - 1200);
+    });
+
+    test(`check 64: a USDC claim 6 hours back, with no buyer Base address on record, refuses the Phantasma refund (blocks ${bs} s apart)`, async () => {
+      const w = await sellerAfterLocks({ rec: { counterBase: undefined } });
+      w.base.blockSeconds = bs;
+      w.base.head = 1_000_000n;
+      const lock = w.pha.locks.get(H)!;
+      lock.created = T0 - 7 * 3600;
+      lock.deadline = T0 - 61;
+      w.base.events.push({ address: SWAP, blockNumber: w.base.blockBack(6 * 3600), eventName: 'Claimed', args: { h: H, sender: X_B, preimage: SECRET } });
+      const p = refusedWith(await checks.refundPha(w.deps, (await w.store.getTrade(7))!), 'REFUND_PHA');
+      assert.match(p.text, /buyer's USDC was claimed/);
+      assert.equal(w.sends(), 0);
+      w.base.events.pop();
+      assert.equal((await checks.refundPha(w.deps, (await w.store.getTrade(7))!)).ok, true, 'no claim with this h: the refund may go');
+    });
+  }
+
+  for (const bs of [0.05, 0.1, 0.2, 2, 12]) {
+    test(`each search's first bottom is at or before the time it must reach (blocks ${bs} s apart)`, async () => {
+      // Nothing to find, so every search runs down to its bottom.
+      const { base, asked, lowest, reader } = searchOf(bs, 100_000_000n);
+      assert.equal(await reader.anyClaimedForH(H, T0 - 3600), false);
+      assert.ok(base.timeOf(lowest()) <= T0 - 3600 - 600, `check 64 reached ${base.timeOf(lowest())}`);
+      coversOnce(asked, base.head, lowest(), LOG_CHUNK);
+      // At Base's 200 ms the first guess holds: no block more than it needs.
+      if (bs === 0.2) assert.equal(lowest(), base.head - 21_000n);
+      asked.length = 0;
+      assert.equal(await reader.readLockedAt(H, B_B, { fromTime: T0 - 1800 }), null);
+      assert.ok(base.timeOf(lowest()) <= T0 - 1800 - 900, `check 55 reached ${base.timeOf(lowest())}`);
+      asked.length = 0;
+      assert.equal(await reader.claimedSecret(H, KB, T0 - 3600), null);
+      assert.ok(base.timeOf(lowest()) <= T0 - 3600 - 600, `check 62 reached ${base.timeOf(lowest())}`);
+    });
+  }
+
+  test('a 12 hour search at 200 ms a block covers 219,001 blocks: 44 requests where the RPC takes 10,000; 4 refused and 1,096 served where it takes 200, in every such search', async () => {
+    const wide = searchOf(0.2, 100_000_000n, refuseOver(10_000n));
+    assert.equal(await wide.reader.anyClaimedForH(H, T0 - 12 * 3600), false);
+    assert.equal(wide.base.head - wide.lowest() + 1n, 219_001n);
+    assert.equal(wide.asked.length, 44);
+    coversOnce(wide.asked, wide.base.head, wide.lowest(), 5_000n);
+    const narrow = searchOf(0.2, 100_000_000n, refuseOver(200n));
+    assert.equal(await narrow.reader.anyClaimedForH(H, T0 - 12 * 3600), false);
+    assert.equal(narrow.asked.length, 4 + 1_096, 'refused at 5,000, 2,000, 1,000 and 500, then 1,096 requests of 200');
+    narrow.asked.length = 0;
+    assert.equal(await narrow.reader.anyClaimedForH(H, T0 - 12 * 3600), false);
+    assert.equal(narrow.asked.length, 4 + 1_096, 'the next search pays the 4 refused requests again');
+  });
+
+  test('timestamps that never reach back far enough: the search gives up after its widenings, before any log request', async () => {
+    const { base, asked, reader } = searchOf(0.2, 10n ** 12n);
+    let numbered = 0;
+    const block = base.block.bind(base);
+    base.block = async (at = {}) => {
+      if (at.number == null) return block(at);
+      numbered++;
+      return { number: at.number, timestamp: BigInt(T0), baseFeePerGas: base.baseFee };
+    };
+    await assert.rejects(reader.anyClaimedForH(H, T0 - 3600), /still after the time/);
+    assert.equal(SEARCH_WIDEN_MAX, 6, 'the number of widenings is part of the rule, not only a constant');
+    assert.equal(numbered, 7, 'the first guess and 6 widenings');
+    assert.equal(asked.length, 0);
+  });
+
+  test('a block that cannot be read fails closed: check 64 refuses and tries again, check 55\'s search throws', async () => {
+    const w = await sellerAfterLocks({ rec: { counterBase: undefined } });
+    w.base.blockSeconds = 0.2;
+    w.base.head = 1_000_000n;
+    w.pha.locks.get(H)!.deadline = T0 - 61;
+    const block = w.base.block.bind(w.base);
+    w.base.block = async (at = {}) => {
+      if (at.number != null) throw new Error('fake base: no such block');
+      return block(at);
+    };
+    const p = refusedWith(await checks.refundPha(w.deps, (await w.store.getTrade(7))!), 'REFUND_PHA');
+    assert.equal(p.retry, true);
+    assert.equal(w.sends(), 0);
+    await assert.rejects(new BaseReader(w.base, 'devnet').readLockedAt(H, B_B, { fromTime: T0 - 300 }));
+  });
+});
+
+describe('log requests: every search starts at 5,000 and steps down inside itself; a rate limit told by its code is thrown at once', () => {
+  /** viem's shape: its own summary, the node's words in `details`, the request in `message`, the node's error as `cause`. */
+  const viem = (inner: Record<string, unknown>, summary = 'RPC Request failed.') => Object.assign(new Error(`${summary}\n\nURL: https://rpc.example\nRequest body: {"method":"eth_getLogs","params":[{"fromBlock":"0x1","toBlock":"0xc8"}]}`), {
+    name: 'RpcRequestError', shortMessage: summary, details: String(inner.message ?? ''), code: inner.code, cause: Object.assign(new Error(String(inner.message ?? '')), inner)
+  });
+  /** viem's shape for an HTTP failure: the status on the outer error, the transport's words in `details`. */
+  const viemHttp = (status: number | undefined, details: string) => Object.assign(new Error(`HTTP request failed.\n\nURL: https://rpc.example\nDetails: ${details}`), {
+    name: 'HttpRequestError', shortMessage: 'HTTP request failed.', details, status, cause: new Error(details)
+  });
+  // Real answers first (SEARCH-FIX section B), then other wordings seen in the wild.
+  const RANGE: Array<Record<string, unknown>> = [
+    { code: -32614, message: 'eth_getLogs is limited to a 200 range' }, // sepolia.base.org, 13 Nov 2026
+    { code: -32602, message: 'eth_getLogs is limited to a 10,000 blocks range' }, // QuickNode
+    { code: -32005, message: 'query returned more than 10000 results' },
+    { code: -32600, message: 'Log response size exceeded. You can make eth_getLogs requests with up to a 2K block range.' }, // Alchemy
+    { code: -32000, message: 'ranges over 10000 blocks are not supported on freemium tier' },
+    { code: -32000, message: 'block range limit reached' },
+    // Range by wording, harmless: it only steps this one search down.
+    { code: -32000, message: 'block range extends beyond current head block' },
+    { status: 413, message: 'Request Entity Too Large' },
+    { code: -32000, message: 'block range too large' },
+    { code: -32005, message: 'query returned more than 10000 results. Try with this block range [0x1, 0x2710].' },
+    { code: -32000, message: 'exceed maximum block range: 200' },
+    { code: -32000, message: 'requested too many blocks from 1 to 501, maximum is set to 200' },
+    { code: -32000, message: 'limit exceeded' },
+    { message: 'value out of range' }
+  ];
+  const RATE: Array<Record<string, unknown>> = [
+    { code: -32007, message: '50/second request limit reached - reduce calls per second or upgrade your account at quicknode.com' }, // QuickNode
+    { status: 429, message: 'Too Many Requests' },
+    { code: 429, message: 'Your app has exceeded its compute units per second capacity' }, // Alchemy
+    { code: -32005, message: 'daily request count exceeded, request rate limited' }, // Infura
+    { code: 429, message: 'exceeded' },
+    { code: -32005, message: 'project ID request rate exceeded' },
+    { code: -32016, message: 'over rate limit' },
+    { code: -32000, message: 'Your app has exceeded its compute units per second capacity' },
+    { code: -32000, message: 'monthly quota of credits used up for this block range' },
+    { code: -32029, message: 'x' }
+  ];
+  const NEITHER: Array<Record<string, unknown>> = [
+    { message: 'The request took too long to respond.' }, { message: 'fetch failed' },
+    { code: -32603, message: 'internal error' }, { message: 'header not found' }
+  ];
+  const size = (a: { from: bigint; to: bigint }) => a.to - a.from + 1n;
+  /** A rate limit told by its code (HTTP 429, -32007, -32029), not only by its words. */
+  const coded = (e: Record<string, unknown>) => [429, -32007, -32029].includes(Number(e.code)) || Number(e.status) === 429;
+
+  test('isRangeError and isRateLimit on real answers: plain, wrapped once and wrapped twice', () => {
+    for (const [range, rate, rows] of [[true, false, RANGE], [false, true, RATE], [false, false, NEITHER]] as const) {
+      for (const e of rows) {
+        const forms: Array<[string, unknown]> = [
+          ['plain', Object.assign(new Error(String(e.message ?? '')), e)],
+          ['wrapped', viem(e)],
+          ['wrapped twice', Object.assign(viem({}, 'An unknown RPC error occurred.'), { cause: viem(e) })]
+        ];
+        for (const [how, err] of forms) {
+          assert.equal(isRangeError(err), range, `isRangeError ${how} ${JSON.stringify(e)}`);
+          assert.equal(isRateLimit(err), rate, `isRateLimit ${how} ${JSON.stringify(e)}`);
+          assert.equal(isRateLimitCode(err), rate && coded(e), `isRateLimitCode ${how} ${JSON.stringify(e)}`);
+        }
+      }
+    }
+    // Only viem's summary and the node's own words are read: its full message also holds the request (URL and body).
+    const noisy = Object.assign(new Error('RPC Request failed.\n\nURL: https://rate-limit.example/block-range\nRequest body: {"method":"eth_getLogs"}'), { name: 'RpcRequestError', shortMessage: 'RPC Request failed.', details: 'header not found', code: -32000 });
+    assert.equal(isRateLimit(noisy), false, 'a rate word in the request is not the node\'s answer');
+    assert.equal(isRangeError(noisy), false, 'a range word in the request is not the node\'s answer');
+    // Without a summary or details the message itself is the node's words.
+    assert.equal(isRangeError(new Error('block range too large')), true);
+    assert.equal(isRateLimit(new Error('rate limit')), true);
+    // viem's own summary for -32005 says "limit": a rate limit's words still decide.
+    assert.equal(isRangeError(viem({ code: -32005, message: 'daily request count exceeded, request rate limited' }, 'Request exceeds defined limit.')), false);
+    assert.equal(isRangeError(viem({ code: -32005, message: 'query returned more than 10000 results' }, 'Request exceeds defined limit.')), true);
+    // An HTTP failure as viem wraps it.
+    assert.equal(isRateLimit(viemHttp(429, 'Too Many Requests')), true);
+    assert.equal(isRangeError(viemHttp(429, 'Too Many Requests')), false);
+    assert.equal(isRangeError(viemHttp(413, 'Request Entity Too Large')), true);
+    assert.equal(isRangeError(viemHttp(undefined, 'fetch failed')), false);
+    assert.equal(isRateLimit(viemHttp(undefined, 'fetch failed')), false);
+    for (const x of [null, undefined, 'block range too large', 'rate limit', 7, {}]) {
+      assert.equal(isRangeError(x), false, String(x));
+      assert.equal(isRateLimit(x), false, String(x));
+    }
+  });
+
+  test('an RPC that takes 200 blocks: every search pays the 4 refused requests (5,000, 2,000, 1,000, 500) and then asks 200, none twice', async () => {
+    const { base, asked, lowest, reader } = searchOf(0.2, 1_000_000n, refuseOver(200n));
+    for (let round = 0; round < 2; round++) {
+      asked.length = 0;
+      assert.equal(await reader.anyClaimedForH(H, T0 - 3600), false);
+      const refused = asked.filter((a) => size(a) > 200n);
+      assert.deepEqual(refused.map(size), [5_000n, 2_000n, 1_000n, 500n], `search ${round + 1} starts at 5,000`);
+      assert.deepEqual(asked.slice(0, 4), refused, 'the refused requests come first');
+      const served = asked.slice(4);
+      coversOnce(served, base.head, lowest(), 200n);
+      assert.ok(served.slice(0, -1).every((a) => size(a) === 200n), 'every request but the last is 200');
+      assert.equal(new Set(asked.map((a) => `${a.from}-${a.to}`)).size, asked.length, 'no request asked twice');
+    }
+  });
+
+  test('an RPC that takes at most 60 blocks: the ladder ends at 50, never a halved size', async () => {
+    const { base, asked, lowest, reader } = searchOf(0.2, 1_000_000n, refuseOver(60n));
+    assert.equal(await reader.anyClaimedForH(H, T0 - 3600), false);
+    const refused = asked.filter((a) => size(a) > 60n);
+    assert.deepEqual(refused.map(size), [5_000n, 2_000n, 1_000n, 500n, 200n, 100n]);
+    assert.equal(new Set(asked.map((a) => `${a.from}-${a.to}`)).size, asked.length, 'no request asked twice');
+    coversOnce(asked.filter((a) => !refused.includes(a)), base.head, lowest(), 50n);
+  });
+
+  test('an unknown error steps down at 5,000, 2,000 and 1,000; the same error at 500 is thrown', async () => {
+    const { asked, reader } = searchOf(0.2, 1_000_000n, () => new Error('fetch failed'));
+    await assert.rejects(reader.anyClaimedForH(H, T0 - 3600), /fetch failed/);
+    assert.deepEqual(asked.map(size), [5_000n, 2_000n, 1_000n, 500n]);
+    // A timeout as viem wraps it does the same.
+    const t = searchOf(0.2, 1_000_000n, () => Object.assign(new Error('The request took too long to respond.'), { name: 'TimeoutError', shortMessage: 'The request took too long to respond.' }));
+    await assert.rejects(t.reader.anyClaimedForH(H, T0 - 3600), /too long/);
+    assert.deepEqual(t.asked.map(size), [5_000n, 2_000n, 1_000n, 500n]);
+  });
+
+  test('an unknown refusal above 1,000 blocks: the search goes on at 1,000, with no gap and no overlap', async () => {
+    const { base, asked, lowest, reader } = searchOf(0.2, 1_000_000n, (q) => (q.toBlock - q.fromBlock + 1n > 1_000n ? new Error('bad request') : null));
+    assert.equal(await reader.anyClaimedForH(H, T0 - 3600), false);
+    assert.deepEqual(asked.slice(0, 2).map(size), [5_000n, 2_000n]);
+    coversOnce(asked.slice(2), base.head, lowest(), 1_000n);
+  });
+
+  test('a failure in the middle of a search steps down from there, with no gap and no overlap', async () => {
+    const { base, asked, lowest, reader } = searchOf(0.2, 1_000_000n, (_q, n) => (n === 3 ? new Error('fetch failed') : null));
+    assert.equal(await reader.anyClaimedForH(H, T0 - 3600), false);
+    assert.deepEqual(asked.slice(0, 4).map(size), [5_000n, 5_000n, 5_000n, 2_000n]);
+    assert.deepEqual(asked[3]!.to, asked[2]!.to, 'the failed range is asked again, smaller, from the same top');
+    const served = asked.filter((_a, i) => i !== 2);
+    coversOnce(served, base.head, lowest(), 5_000n);
+    assert.ok(served.slice(3, -1).every((a) => size(a) === 2_000n), 'the rest of this search asks 2,000');
+  });
+
+  test('a request cut at the bottom of its search: the rules count the blocks it really asked for', async () => {
+    // A chain of 1,500 blocks: the first request is cut to 1,501 blocks, and its refusal steps to 1,000, not to
+    // 2,000 (which would ask the same 1,501 blocks again).
+    const short = searchOf(0.2, 1_500n, refuseOver(1_000n));
+    assert.equal(await short.reader.anyClaimedForH(H, T0 - 3600), false);
+    assert.deepEqual(short.asked.map(size), [1_501n, 1_000n, 501n]);
+    assert.equal(new Set(short.asked.map((a) => `${a.from}-${a.to}`)).size, short.asked.length, 'no range asked twice');
+    // A request of 500 blocks or fewer follows the strict rule even when the search's size is still 5,000:
+    // an unknown failure is thrown at once, and a range refusal steps down from the size asked.
+    const tiny = searchOf(0.2, 299n, () => new Error('fetch failed'));
+    await assert.rejects(tiny.reader.anyClaimedForH(H, T0 - 3600), /fetch failed/);
+    assert.deepEqual(tiny.asked.map(size), [300n]);
+    const tinyRange = searchOf(0.2, 299n, refuseOver(100n));
+    assert.equal(await tinyRange.reader.anyClaimedForH(H, T0 - 3600), false);
+    assert.deepEqual(tinyRange.asked.map(size), [300n, 200n, 100n, 100n, 100n]);
+  });
+
+  test('two searches in a row both start at 5,000', async () => {
+    const { asked, reader } = searchOf(0.2, 1_000_000n, refuseOver(2_000n));
+    assert.equal(await reader.anyClaimedForH(H, T0 - 3600), false);
+    assert.equal(size(asked[0]!), 5_000n);
+    assert.equal(size(asked[1]!), 2_000n);
+    asked.length = 0;
+    assert.equal(await reader.claimedSecret(H, KB, T0 - 3600), null);
+    assert.equal(size(asked[0]!), 5_000n, 'nothing is kept from the search before');
+    // Two searches at once each step down for themselves.
+    asked.length = 0;
+    assert.deepEqual(await Promise.all([reader.anyClaimedForH(H, T0 - 3600), reader.anyClaimedForH(H, T0 - 3600)]), [false, false]);
+    assert.equal(asked.filter((a) => size(a) === 5_000n).length, 2);
+  });
+
+  test('a range refusal at 1 block is thrown, after every rung of the ladder', async () => {
+    const { asked, reader } = searchOf(0.2, 1_000_000n, () => Object.assign(new Error('block range too large'), { code: -32000 }));
+    await assert.rejects(reader.anyClaimedForH(H, T0 - 3600), /block range too large/);
+    assert.deepEqual(asked.map(size), [...LOG_STEPS]);
+  });
+
+  test('a rate limit told by its code is thrown at 5,000 blocks without a second request; one told only by its words steps down to 500 and is thrown there', async () => {
+    for (const e of RATE) {
+      for (const err of [Object.assign(new Error(String(e.message ?? '')), e), viem(e)]) {
+        const { asked, reader } = searchOf(0.2, 1_000_000n, () => err);
+        await assert.rejects(reader.anyClaimedForH(H, T0 - 3600), (x: unknown) => x === err);
+        assert.deepEqual(asked.map(size), coded(e) ? [5_000n] : [5_000n, 2_000n, 1_000n, 500n], JSON.stringify(e));
+      }
+    }
+  });
+
+  test('a range refusal worded like a rate limit, on an RPC that takes 1,000 blocks: the search goes on at 1,000', async () => {
+    for (const words of ['requested block range exceeds the capacity of this node', 'Block range limit exceeded. Upgrade your plan for higher throughput', 'max results per request limit reached']) {
+      const refusal = Object.assign(new Error(words), { code: -32000 });
+      assert.equal(isRateLimit(refusal), true, `${words}: reads like a rate limit`);
+      const { base, asked, lowest, reader } = searchOf(0.2, 1_000_000n, (q) => (q.toBlock - q.fromBlock + 1n > 1_000n ? refusal : null));
+      assert.equal(await reader.anyClaimedForH(H, T0 - 3600), false, words);
+      assert.deepEqual(asked.slice(0, 2).map(size), [5_000n, 2_000n]);
+      coversOnce(asked.slice(2), base.head, lowest(), 1_000n);
+    }
+    // The same words on a request of 500 blocks or fewer are a rate limit: thrown at once.
+    const small = searchOf(0.2, 299n, () => Object.assign(new Error('requested block range exceeds the capacity of this node'), { code: -32000 }));
+    await assert.rejects(small.reader.anyClaimedForH(H, T0 - 3600), /capacity/);
+    assert.equal(small.asked.length, 1);
+  });
+
+  test('a rate limit in the middle of a search, or below 500 blocks, is thrown: no smaller retry, and the next search asks for 5,000', async () => {
+    let limited = false;
+    const { base, asked, lowest, reader } = searchOf(0.2, 1_000_000n, (_q, n) => {
+      if (limited || n !== 3) return null;
+      limited = true;
+      return viem({ code: -32007, message: '50/second request limit reached - reduce calls per second or upgrade your account at quicknode.com' });
+    });
+    await assert.rejects(reader.anyClaimedForH(H, T0 - 3600), (e: unknown) => (e as { code?: number }).code === -32007);
+    assert.equal(asked.length, 3, 'no smaller retry after the rate limit');
+    assert.ok(asked.every((a) => size(a) === LOG_CHUNK));
+    asked.length = 0;
+    assert.equal(await reader.anyClaimedForH(H, T0 - 3600), false);
+    coversOnce(asked, base.head, lowest(), LOG_CHUNK);
+    assert.equal(size(asked[0]!), LOG_CHUNK);
+    // On an RPC that takes 200, a rate limit at 200 is thrown too.
+    const narrow = searchOf(0.2, 1_000_000n, (q, n) => (n === 6 ? Object.assign(new Error('Too Many Requests'), { status: 429 }) : refuseOver(200n)(q)));
+    await assert.rejects(narrow.reader.anyClaimedForH(H, T0 - 3600), /Too Many Requests/);
+    assert.deepEqual(narrow.asked.map(size), [5_000n, 2_000n, 1_000n, 500n, 200n, 200n]);
   });
 });

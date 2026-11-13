@@ -514,7 +514,7 @@ const serverTimeOf = (v: unknown): number | null => (typeof v === 'number' && Nu
 function listSymbol(symbol: unknown): string {
   if (symbol === undefined || symbol === 'all') return 'all';
   const s = tableSymbol(symbol);
-  if (!s) throw bad('symbol is one of the kit\'s tokens (TAZ, SOUL, KCAL, RA) or "all".');
+  if (!s) throw bad('symbol is one of the kit\'s tokens (C, RA, TAZ, SOUL, KCAL) or "all".');
   return s;
 }
 
@@ -523,7 +523,7 @@ function offerBody(b: NewOffer): NewOffer {
   if (!isRec(b)) throw bad('An offer is an object.');
   if (b.side !== 'sell' && b.side !== 'buy') throw bad('side is sell or buy.');
   const symbol = tableSymbol(b.symbol);
-  if (!symbol) throw bad('symbol is one of the kit\'s tokens (TAZ, SOUL, KCAL, RA).');
+  if (!symbol) throw bad('symbol is one of the kit\'s tokens (C, RA, TAZ, SOUL, KCAL).');
   if (!isPhaAddress(b.makerPha)) throw bad('makerPha is a Phantasma address (P2K…).');
   const makerBase = evmLower(b.makerBase);
   if (!makerBase) throw bad('makerBase is a Base address (0x + 40 hex).');

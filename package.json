@@ -1,6 +1,6 @@
 {
   "name": "saturn-p2p-bot-kit",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "description": "Saturn P2P bot kit: run your own maker or taker bot against the public P2P board, with your own keys on your own machine.",
   "license": "MIT",

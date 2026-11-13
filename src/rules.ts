@@ -10,7 +10,7 @@
  * no store: callers pass `now` (unix seconds, never before the newest Base
  * block) and the reads.
  *
- * A trade is for one token (TAZ, SOUL, KCAL or RA). Lock amounts are raw
+ * A trade is for one token (C, RA, TAZ, SOUL or KCAL). Lock amounts are raw
  * units and the tokens have different decimals, so every check of a lock
  * compares its symbol EXACTLY with the token the kit agreed to, from its own
  * record, never "any token the kit trades" and never the board's word.
@@ -137,7 +137,7 @@ export function symName(symbol: unknown): string {
 const whole = (raw: bigint, t: { symbol: string; decimals: number }) => `${amountText(raw, t.decimals)} ${t.symbol}`;
 
 /** The refusal for a token the kit does not trade (or no longer opens new trades for). */
-const NOT_TRADED_TEXT = 'Pick one of the tokens this site trades: TAZ, SOUL, KCAL or RA.';
+const NOT_TRADED_TEXT = 'Pick one of the tokens this site trades: C, RA, TAZ, SOUL or KCAL.';
 
 /** The fee SaturnSwap keeps on a claim. */
 export function feeOf(usdc: bigint, bps: number): bigint {

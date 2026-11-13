@@ -152,7 +152,7 @@ function asConfigError<T>(where: string, fn: () => T): T {
 
 function symbolOf(o: Record<string, unknown>, where: string): string {
   const s = o.symbol;
-  if (checkToken(s)) throw configError(`${where}.symbol is TAZ, SOUL, KCAL or RA, written exactly so.`);
+  if (checkToken(s)) throw configError(`${where}.symbol is C, RA, TAZ, SOUL or KCAL, written exactly so.`);
   return s as string;
 }
 
@@ -577,7 +577,7 @@ export async function runBot(o: RunBotOptions): Promise<number> {
     const blocking = printPreflight(report, cfg, say);
     if (dryRun) return await dryRunRest(kit, cfg, { say, usdc, blocking, refused: guard!.refused });
     if (blocking.length) {
-      say(`Not starting: ${blocking.join(', ')} failed (above). Nothing was sent.`);
+      say(`Not starting: ${blocking.join(', ')} (above) stops the start. Nothing was sent.`);
       return 1;
     }
     return await trade(kit, cfg, { say, usdc, now, sleep, signals: o.signals ?? process });
@@ -586,14 +586,21 @@ export async function runBot(o: RunBotOptions): Promise<number> {
   }
 }
 
-/** Print the preflight; returns the names of the failed items that stop a start. */
+/**
+ * Print the preflight; returns the names of the items that stop a start: a
+ * failed item, and a token the escrow does not take on this network
+ * (TOKEN_OFF, which the kit's report counts as passed) when this config
+ * trades it. A failed or off escrow item of a token the config does not
+ * trade stops nothing.
+ */
 function printPreflight(report: PreflightReport, cfg: BotConfig, say: (l: string) => void): string[] {
   say(`Addresses: Phantasma ${report.address.pha}, Base ${report.address.base}`);
   const used = new Set([...cfg.offers.map((x) => x.symbol), ...cfg.take.map((x) => x.symbol)]);
   const blocking: string[] = [];
   for (const i of report.items) {
-    say(`preflight ${i.ok ? 'ok' : 'FAIL'} ${i.name}: ${i.text}`);
-    if (i.ok || WARN_ONLY.has(i.name)) continue;
+    const off = i.code === 'TOKEN_OFF';
+    say(`preflight ${off ? 'off' : i.ok ? 'ok' : 'FAIL'} ${i.name}: ${i.text}`);
+    if ((i.ok && !off) || WARN_ONLY.has(i.name)) continue;
     const m = /^escrow (\S+)$/.exec(i.name);
     if (m && !used.has(m[1]!)) continue;
     blocking.push(i.name);
@@ -637,7 +644,7 @@ async function dryRunRest(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => 
   }
   const r = x.refused();
   say(`Dry run done: nothing was sent (board writes refused: ${r.boardWrites}, chain sends refused: ${r.chainSends}).`);
-  if (x.blocking.length) say(`A real start would stop here: ${x.blocking.join(', ')} failed.`);
+  if (x.blocking.length) say(`A real start would stop here: ${x.blocking.join(', ')} (above).`);
   return x.blocking.length ? 1 : 0;
 }
 

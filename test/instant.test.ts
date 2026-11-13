@@ -1252,6 +1252,18 @@ describe('the re-checks right before the lock is signed (checks 31 and 33)', () 
     assert.equal(sends(s.w), 0);
   });
 
+  test('a token the escrow takes no locks of (its largest lock reads 0): refused (ESCROW_PARAMS) before anything is signed, zero sends', async () => {
+    const s = await buyerLocked(60);
+    const sym = (await s.kit.store.getTrade(s.id))!.symbol;
+    s.w.pha.bounds[sym] = { min: s.w.pha.bounds[sym]!.min, max: 0n };
+    const r = await checks.instantSellerLock(depsOf(s), structuredClone(s.w.board.trades.get(s.id)!.t), (await s.kit.store.getTrade(s.id))!, (await s.kit.store.getOffer(s.offer.id))!);
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.equal(r.problem.code, 'ESCROW_PARAMS');
+    assert.match(r.problem.text, /is not enabled in the P2P escrow on Phantasma right now/);
+    assert.equal(sends(s.w), 0);
+  });
+
   test('a squat mined between the signer\'s re-check and its lock (P2:used): no new secret is made for the buyer\'s hash, and the next step refuses', async () => {
     const s = await buyerLocked(60);
     const deps = depsOf(s);

@@ -148,7 +148,7 @@ export function toRaw(text: unknown, decimals: number, what: string): bigint {
 /** Whole tokens of `symbol` ("2.5") as raw units, with the decimals of the kit's own token table only (check 1). */
 export function tokenToRaw(symbol: string, text: unknown, what = 'The amount'): bigint {
   const t = tokenOf(symbol);
-  if (!t) throw problemError(checks.problem('TOKEN_NOT_TRADED', 'This names no token this kit trades (TAZ, SOUL, KCAL or RA, written exactly so).'));
+  if (!t) throw problemError(checks.problem('TOKEN_NOT_TRADED', 'This names no token this kit trades (C, RA, TAZ, SOUL or KCAL, written exactly so).'));
   return toRaw(text, t.decimals, what);
 }
 

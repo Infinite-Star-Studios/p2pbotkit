@@ -238,7 +238,7 @@ function issued<K extends SignKind>(d: CheckDeps, kind: K, tradeId: number, sign
 /** Check 1: a token of the kit's own table, the symbol matching exactly (decimals and bounds only from there). */
 export function checkToken(symbol: unknown): Problem | null {
   const t = tokenOf(symbol);
-  return t && t.enabled ? null : problem('TOKEN_NOT_TRADED', 'This names no token this kit trades (TAZ, SOUL, KCAL or RA, written exactly so).');
+  return t && t.enabled ? null : problem('TOKEN_NOT_TRADED', 'This names no token this kit trades (C, RA, TAZ, SOUL or KCAL, written exactly so).');
 }
 
 /** The plain words for a network whose escrow is not pinned in this release. */

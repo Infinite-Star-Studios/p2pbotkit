@@ -180,7 +180,7 @@ test('pins.ts equals the site\'s constants.js: tokens, escrow pins, Base pins, t
       if (a && b) assert.deepEqual([a.phaContract, a.phaCodeSha256, a.phaAdmin], [b.phaContract, b.phaCodeSha256, b.phaAdmin]);
     }
   }
-  for (const sym of ['TAZ', 'SOUL', 'KCAL', 'RA', 'taz', ' TAZ', 'TAZ ', '__proto__', 'constructor', 'DOGE', '', null, undefined, 7, {}]) {
+  for (const sym of ['C', 'RA', 'TAZ', 'SOUL', 'KCAL', 'c', 'taz', ' TAZ', 'TAZ ', '__proto__', 'constructor', 'DOGE', '', null, undefined, 7, {}]) {
     const a = pins.tokenOf(sym), b = site.tokenOf(sym);
     assert.equal(a?.symbol ?? null, b?.symbol ?? null, `tokenOf(${String(sym)})`);
   }

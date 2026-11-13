@@ -7,6 +7,71 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.3.0 (13 November 2026)
+
+Token C (Credits) joins the token table; Base log searches follow Base's
+200 ms blocks; a rate limit is no longer read as a range refusal. The two
+fixes change the kit's checks, so this is a minor release: upgrade for them
+even if you do not trade C.
+
+- C, 6 decimals: one lock is 1 to 10,000 C (raw 1,000,000 to
+  10,000,000,000, the escrow's own limits for C), one offer at most
+  100,000 C (raw 100,000,000,000), and a price at most 1,000,000 USDC per
+  C, as for every token. C pays no gas and is not staked. The table's order
+  is now C, RA, TAZ, SOUL, KCAL, the site's order, and the refusals that
+  list the tokens follow it ("Pick one of the tokens this site trades: C,
+  RA, TAZ, SOUL or KCAL.").
+- A 0.2.x kit keeps working once the board lists C: it leaves C offers and
+  trades alone (its offer list logs `board: N offer(s) the kit cannot read
+  were left out`) and cannot post or take C. Upgrade to trade C.
+- The board has no reference price for C on mainnet until a DEX pool for it
+  exists: there an offer of C that follows the reference price is refused,
+  and offers at a fixed price work.
+- Base makes a block every 200 ms, but 0.2.4 and earlier counted 2 s a
+  block when they turned a time span into blocks, so a log search reached
+  back only a tenth of the time it meant to. It matters when the fast reads
+  are not at hand (the lock's receipt, `getPreimage`, `getSwap`, which are
+  still read first): the seller could fail to find the buyer's USDC lock and
+  keep refusing to share the secret until both sides refunded; the buyer
+  could fail to find the public secret; and the seller's Phantasma refund
+  (check 64), on a trade with no buyer Base address on record, could miss a
+  USDC claim made earlier in the trade and refund tokens the buyer was owed.
+  A search now guesses its first block at 200 ms a block, reads that block,
+  and while its timestamp is after the time the search must reach, doubles
+  the span, at most 6 times; past that, or when the block cannot be read,
+  the check refuses and tries again, as for any failed read.
+- A correct search covers ten times the blocks: a 12 hour search is about
+  219,000 blocks.
+- Log requests start at 5,000 blocks (500 before). When one fails, the
+  search steps down a ladder of round sizes (5,000, 2,000, 1,000, 500, 200,
+  100, 50, 20, 10, 5, 2, 1) inside itself, instead of halving, and nothing is
+  kept between searches: every search starts at 5,000 again. A rate limit
+  told by its code (HTTP 429, -32007, -32029) is thrown at once, at any
+  size: the search stops and the check tries again later. Above 500 blocks
+  any other failure steps down, an error that reads like a rate limit only
+  by its words too (a refusal of a size 0.2.4 never asked for may be worded
+  in a way nobody has seen); at 500 or fewer a rate limit by code or by
+  words is thrown, only a range refusal steps down, and anything else is
+  thrown, as before. A failure at 1 block is thrown.
+- The refund check right after the lock ends searches about 12 hours back,
+  and further back when the refund runs later. A 12 hour search makes 44
+  requests on an RPC that takes 5,000 blocks or more, and 1,096 on one that
+  takes 200, plus 4 refused requests at the start of each such search.
+- A rate limit (HTTP 429, codes -32007 and -32029, or words such as "rate
+  limit", "too many requests", "compute units", "quota") is looked for first,
+  through the whole error chain, and at 500 blocks or fewer is never taken
+  for a range refusal. 0.2.4 read most of them as range refusals and halved
+  its requests down to one block against an RPC that was throttling it; now
+  a search asks such an RPC at most 3 smaller requests, and none when the
+  answer carries a rate limit code. A range refusal is HTTP 413, code -32614
+  or -32005, or words about a range, a limit or a size.
+- `preflight()` no longer fails for a token the escrow does not take on a
+  network yet (its largest lock reads 0, the admin has not allowed it): that
+  item passes with `code: 'TOKEN_OFF'`, so `if (!report.ok)` does not stop a
+  bot that never trades it. Paused locks and bounds other than the kit's
+  table still fail. The example bots print such an item as `preflight off`
+  and do not start when their config trades that token.
+
 ## 0.2.4 (11 November 2026)
 
 `start.sh`, the bots' process guard (`examples/seller-bot.ts`) and the

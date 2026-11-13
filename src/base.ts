@@ -13,8 +13,12 @@
  *     estimate, at least 150,000; an approval or a lock with the estimate
  *     plus 30%; lockWithPermit with the pinned gas limit;
  *   - fees stay under the pinned caps (pins.ts feeCaps), whatever the RPC asks;
- *   - a log search goes back in chunks of at most 500 blocks, halved when
- *     the RPC refuses a range.
+ *   - a log search goes back in requests of 5,000 blocks, stepped down a
+ *     ladder of round sizes inside that search when a request fails (every
+ *     search starts at 5,000 again; a rate limit by its code is thrown at
+ *     once), and
+ *     reaches back to a block whose timestamp is at or before the time it
+ *     must cover.
  *
  * Reads go only to the configured Base RPC (its chain id must equal the pin,
  * check 67), never to the board. The transport (BaseClient) is an interface:
@@ -95,8 +99,36 @@ const CLAIMED_EVENT = eventOf('Claimed');
 
 /** A lock-time search starts this long before the Phantasma lock's getCreated (clock skew between the chains, and margin). */
 export const LOCK_SCAN_MARGIN = 900;
-/** Log searches ask for at most this many blocks at once (SPEC section 6). */
-export const LOG_CHUNK = 500n;
+/**
+ * The sizes a log request may ask for, largest first. Every search starts at
+ * the first and steps down to the next inside itself when a request fails
+ * (see #scanBack for which failures): providers' limits are round numbers
+ * (10,000, 2,000, 500, 200 ...), which halving would miss (5,000 halved
+ * lands on 156 where 200 is allowed). The results are filtered by contract
+ * and topics, so a wide range costs nothing but the node's work. No size is
+ * kept between searches: a kept size that never went back up let one
+ * misread error slow a reader for the life of the process, and keeping saves
+ * at most 4 refused requests a search.
+ */
+export const LOG_STEPS: readonly bigint[] = Object.freeze([5_000n, 2_000n, 1_000n, 500n, 200n, 100n, 50n, 20n, 10n, 5n, 2n, 1n]);
+/** The first request's size of every search (SPEC section 6). */
+export const LOG_CHUNK = LOG_STEPS[0]!;
+/**
+ * The largest size releases before 0.3.0 ever asked for. A provider's refusal
+ * of a larger request may be worded in a way nobody has seen yet, so above
+ * this size any failure but a rate limit told by its code steps down (the
+ * words of a rate limit may belong to such a refusal); at or below it only
+ * a recognised range refusal does, and a rate limit by code or by words is
+ * thrown, as before.
+ */
+export const LOG_STEP_PROVEN = 500n;
+/**
+ * How many times a search may widen its first guess of where to start (each
+ * time twice as far back) before it gives up and the check that needs it
+ * refuses: a node whose timestamps never reach back far enough cannot keep a
+ * search going.
+ */
+export const SEARCH_WIDEN_MAX = 6;
 /** An escrow call's gas limit is twice the estimate, never below this (SPEC sections 6 and 8). */
 export const MIN_CLAIM_GAS = 150_000n;
 /** The EIP-2612 permit of a one-step lock lasts this long (check 46), under the 2 h the site's wallet allows. */
@@ -281,19 +313,76 @@ function toSwap(s: unknown): BaseSwap {
 }
 
 /**
- * Whether an RPC error means "ask for fewer blocks": HTTP 413, the range
- * error codes, or a message about the range or result size. A rate limit, a
- * timeout or a node error is not.
+ * A provider's rate limit or quota (HTTP 429, QuickNode -32007, -32029, and
+ * the words providers use for it). No bare "limit reached": "block range
+ * limit reached" is a range refusal.
+ */
+const RATE_LIMIT_CODES: ReadonlySet<number> = new Set([429, -32007, -32029]);
+const RATE_LIMIT_TEXT = /rate.?limit|too many requests|request rate|rate exceeded|request limit|requests? per (second|minute|day)|per second|throughput|capacity|credits|compute units|daily (request|limit)|monthly (request|limit)|quota/i;
+/**
+ * A refusal of the block range or of the result size. The bare words are
+ * safe because a rate limit is looked for first and nothing is kept between
+ * searches: a misread costs at most the rungs below 500 in one search.
+ */
+const RANGE_CODES: ReadonlySet<number> = new Set([-32614, -32005]);
+const RANGE_TEXT = /range|limit|exceed|too large|too many|more than \d/i;
+
+type RpcErrorLike = { status?: number; code?: number; shortMessage?: string; details?: string; message?: string; cause?: unknown } | null;
+
+/** An error and its causes (viem wraps the node's answer), at most 8 deep. */
+function errorChain(err: unknown): NonNullable<RpcErrorLike>[] {
+  const out: NonNullable<RpcErrorLike>[] = [];
+  let x = err as RpcErrorLike;
+  for (let i = 0; x && typeof x === 'object' && i < 8; i++, x = x.cause as RpcErrorLike) out.push(x);
+  return out;
+}
+
+/** The words of one error: viem's summary and the node's own text when it has them (its full message also holds the request). */
+function errorWords(x: NonNullable<RpcErrorLike>): string {
+  const short = `${x.shortMessage ?? ''} ${x.details ?? ''}`.trim();
+  return short || String(x.message ?? '');
+}
+
+/**
+ * Whether an RPC error carries a provider's rate limit CODE anywhere in its
+ * cause chain: HTTP status or code 429, code -32007 or -32029. A log search
+ * throws it at once at any size: a smaller request against a provider that
+ * throttles the kit is only more requests.
+ */
+export function isRateLimitCode(err: unknown): boolean {
+  for (const x of errorChain(err)) {
+    if (RATE_LIMIT_CODES.has(Number(x.status)) || RATE_LIMIT_CODES.has(Number(x.code))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an RPC error is a provider's rate limit or quota, anywhere in its
+ * cause chain: one of the codes of isRateLimitCode, or words such as "rate
+ * limit", "too many requests", "compute units", "quota". Words alone decide
+ * only for a request of LOG_STEP_PROVEN blocks or fewer (#scanBack): above
+ * that they may belong to a range refusal nobody has seen.
+ */
+export function isRateLimit(err: unknown): boolean {
+  if (isRateLimitCode(err)) return true;
+  for (const x of errorChain(err)) {
+    if (RATE_LIMIT_TEXT.test(errorWords(x))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an RPC error means "ask for fewer blocks": not a rate limit, and
+ * anywhere in the cause chain HTTP 413, code -32614 or -32005, or words
+ * about a range, a limit, a size or a count. A timeout or a failed fetch is
+ * not one.
  */
 export function isRangeError(err: unknown): boolean {
-  let x = err as { status?: number; code?: number; shortMessage?: string; details?: string; message?: string; cause?: unknown } | null;
-  for (let i = 0; x && i < 8; i++, x = x.cause as typeof x) {
-    if (x.status === 429 || x.code === 429) return false;
-    if (x.status === 413) return true;
-    if (x.code === -32614 || x.code === -32005) return true;
-    const msg = `${x.shortMessage ?? ''} ${x.details ?? ''} ${x.message ?? ''}`;
-    if (/rate.?limit|too many requests/i.test(msg)) return false;
-    if (/block range|range (is )?too (large|wide|big)|too large|too many (blocks|results|logs)|exceed|limit|range/i.test(msg)) return true;
+  if (isRateLimit(err)) return false;
+  for (const x of errorChain(err)) {
+    if (Number(x.status) === 413) return true;
+    if (RANGE_CODES.has(Number(x.code))) return true;
+    if (RANGE_TEXT.test(errorWords(x))) return true;
   }
   return false;
 }
@@ -307,7 +396,6 @@ export class BaseReader {
   readonly cfg: P2PNetConfig;
   readonly swap: Hex;
   readonly usdc: Hex;
-
   constructor(readonly client: BaseClient, readonly network: Network) {
     const cfg = p2pConfig(network);
     if (!cfg) throw new SafetyError(SAFETY.NETWORK_OFF, 'The network is devnet or mainnet.');
@@ -400,20 +488,38 @@ export class BaseReader {
 
   /**
    * SaturnSwap logs of one event, filtered on its indexed `args`, from block
-   * `top` back to `bottom`, in chunks of at most 500 blocks, halved whenever
-   * the RPC refuses a range. `pick` answers a value to stop with, or undefined
-   * to go on; null when nothing was picked.
+   * `top` back to `bottom`, in requests of LOG_CHUNK blocks at first. When a
+   * request fails, in this order: a rate limit told by its code is thrown at
+   * once; above LOG_STEP_PROVEN blocks any other failure steps down one rung
+   * of LOG_STEPS (an error that reads like a rate limit only by its words
+   * too: up there the words may belong to a range refusal, and stepping down
+   * costs at most 3 requests); at LOG_STEP_PROVEN or fewer a rate limit by
+   * code or by words is thrown, only a range refusal steps down, and
+   * anything else is thrown; a failure at 1 block is thrown. The size lives
+   * in this search only: the next search starts at LOG_CHUNK again. The
+   * next range moves only after a served request, so no block is skipped or
+   * asked twice. `pick` answers a value to stop with, or undefined to go on;
+   * null when nothing was picked.
    */
   async #scanBack<T>(event: AbiEvent, args: Record<string, unknown>, top: bigint, bottom: bigint, pick: (l: BaseLog) => T | undefined): Promise<T | null> {
-    let to = top;
     let step = LOG_CHUNK;
+    let to = top;
     while (to >= bottom) {
       const from = to - step + 1n > bottom ? to - step + 1n : bottom;
       let logs: BaseLog[];
       try {
         logs = await this.client.logs({ address: this.swap, event, args, fromBlock: from, toBlock: to });
       } catch (err) {
-        if (isRangeError(err) && step > 1n) { step /= 2n; continue; }
+        // The rules count the blocks this request really asked for: the last
+        // request of a search is cut at its bottom, and stepping from the
+        // search's size could ask the very same range again.
+        const asked = to - from + 1n;
+        if (isRateLimitCode(err) || (asked <= LOG_STEP_PROVEN && isRateLimit(err))) throw err;
+        const next = LOG_STEPS.find((n) => n < asked);
+        if (next !== undefined && (asked > LOG_STEP_PROVEN || isRangeError(err))) {
+          step = next;
+          continue;
+        }
         throw err;
       }
       for (const l of logs) {
@@ -426,11 +532,28 @@ export class BaseReader {
     return null;
   }
 
-  /** The first block of a search that must reach back to unix time `notBefore`. */
-  #bottomFor(head: { number: bigint; time: number }, notBefore: number, margin: number): bigint {
-    const back = Math.max(0, head.time - notBefore) + margin;
-    const span = BigInt(Math.ceil(back / BASE_BLOCK_SECONDS));
-    return head.number > span ? head.number - span : 0n;
+  /**
+   * The first block of a search that must reach back to unix time `notBefore`
+   * less `margin` (from the head's time when `notBefore` is after it). The
+   * block time only guesses it: the guessed block is read, and while its
+   * timestamp is after that time the span is doubled, at most
+   * SEARCH_WIDEN_MAX times. Throws (the check refuses and tries again later)
+   * when the block cannot be read or the widening runs out, never answers a
+   * bottom that falls short.
+   */
+  async #bottomFor(head: { number: bigint; time: number }, notBefore: number, margin: number): Promise<bigint> {
+    const reach = Math.min(notBefore, head.time) - margin;
+    let span = BigInt(Math.ceil((head.time - reach) / BASE_BLOCK_SECONDS));
+    for (let i = 0; ; i++) {
+      const bottom = head.number > span ? head.number - span : 0n;
+      if (bottom === 0n) return 0n;
+      const b = await this.client.block({ number: bottom });
+      const t = Number(b.timestamp);
+      if (b.number !== bottom || !Number.isSafeInteger(t)) throw new Error(`Base answered another block for ${bottom}`);
+      if (t <= reach) return bottom;
+      if (i >= SEARCH_WIDEN_MAX) throw new Error(`Base block ${bottom} is still after the time a log search must reach; not searching a shorter span`);
+      span *= 2n;
+    }
   }
 
   /**
@@ -461,7 +584,7 @@ export class BaseReader {
       }
     }
     if (at == null) {
-      at = await this.#scanBack(LOCKED_EVENT, { h: hl, sender: s }, confirmedBlock, this.#bottomFor(head, o.fromTime, LOCK_SCAN_MARGIN),
+      at = await this.#scanBack(LOCKED_EVENT, { h: hl, sender: s }, confirmedBlock, await this.#bottomFor(head, o.fromTime, LOCK_SCAN_MARGIN),
         (l) => (isOurs(l) && l.blockNumber != null ? l.blockNumber : undefined));
     }
     if (at == null) return null;
@@ -497,7 +620,7 @@ export class BaseReader {
     const hl = h.toLowerCase();
     const headB = await this.client.block({ tag: 'latest' });
     const head = { number: headB.number, time: Number(headB.timestamp) };
-    const hit = await this.#scanBack(CLAIMED_EVENT, { h: hl }, head.number, this.#bottomFor(head, notBefore, 600),
+    const hit = await this.#scanBack(CLAIMED_EVENT, { h: hl }, head.number, await this.#bottomFor(head, notBefore, 600),
       (l) => (l.removed !== true && evmLower(l.address) === this.swap && String(l.args?.h ?? '').toLowerCase() === hl ? true : undefined));
     return hit === true;
   }
@@ -519,7 +642,7 @@ export class BaseReader {
       const pre = await this.client.read({ address: this.swap, abi: SATURN_SWAP_ABI, functionName: 'getPreimage', args: [hl, s], blockNumber: at });
       if (secretOpens(pre, hl)) return String(pre).toLowerCase();
     } catch { /* not claimed there, or a contract without getPreimage: search the logs */ }
-    return this.#scanBack(CLAIMED_EVENT, { h: hl, sender: s }, at, this.#bottomFor(head, notBefore, 600),
+    return this.#scanBack(CLAIMED_EVENT, { h: hl, sender: s }, at, await this.#bottomFor(head, notBefore, 600),
       (l) => (l.removed !== true && evmLower(l.address) === this.swap && secretOpens(l.args?.preimage, hl) ? String(l.args.preimage).toLowerCase() : undefined));
   }
 

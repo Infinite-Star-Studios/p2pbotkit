@@ -53,10 +53,11 @@ export interface P2PToken {
  * symbol up only through tokenOf.
  */
 export const P2P_TOKENS: readonly Readonly<P2PToken>[] = Object.freeze([
+  Object.freeze({ symbol: 'C', decimals: 6, min: 1_000_000n, max: 10_000_000_000n, offerMax: 100_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true }),
+  Object.freeze({ symbol: 'RA', decimals: 9, min: 1_000_000_000n, max: 5_000_000_000_000n, offerMax: 10_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true }),
   Object.freeze({ symbol: 'TAZ', decimals: 9, min: 1_000_000_000n, max: 100_000_000_000_000n, offerMax: 10_000_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true }),
   Object.freeze({ symbol: 'SOUL', decimals: 8, min: 100_000_000n, max: 100_000_000_000_000n, offerMax: 10_000_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: true, enabled: true }),
-  Object.freeze({ symbol: 'KCAL', decimals: 10, min: 10_000_000_000n, max: 300_000_000_000_000_000n, offerMax: 3_000_000_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: true, stake: false, enabled: true }),
-  Object.freeze({ symbol: 'RA', decimals: 9, min: 1_000_000_000n, max: 5_000_000_000_000n, offerMax: 10_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true })
+  Object.freeze({ symbol: 'KCAL', decimals: 10, min: 10_000_000_000n, max: 300_000_000_000_000_000n, offerMax: 3_000_000_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: true, stake: false, enabled: true })
 ]);
 
 /** A symbol as the chain and the table write it: upper case, no spaces, at most 10 characters. */
@@ -97,8 +98,13 @@ export const PHA_LOCK_KCAL = BigInt(PHA_LOCK_GAS.price) * BigInt(PHA_LOCK_GAS.li
 /** Liquid SOUL a seller keeps free through its lock (1.1 SOUL): 1 SOUL for later signatures plus the lock's data fee. */
 export const SOUL_RESERVE = 110_000_000n;
 
-/** Base block time on both chains, used only to narrow log searches. */
-export const BASE_BLOCK_SECONDS = 2;
+/**
+ * Base block time on both chains: a block every 200 ms (it was 2 s). Used
+ * only to guess where a log search starts; base.ts checks the guess against
+ * that block's timestamp and widens it when it falls short, so a block time
+ * that changes again cannot shorten a search.
+ */
+export const BASE_BLOCK_SECONDS = 0.2;
 /** The largest difference between this machine's clock and the newest Base block a lock accepts (seconds). */
 export const CLOCK_SKEW_MAX = 5 * 60;
 

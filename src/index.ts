@@ -5,7 +5,9 @@
  * every check of section 6.4 passes.
  *
  *   const kit = await createKit({ network: 'devnet', phaKeyFile, baseKeyFile, dataDir: './data/mybot' });
- *   if (!(await kit.preflight()).ok) process.exit(1);
+ *   const report = await kit.preflight();
+ *   // A token the escrow does not take here yet passes the report (item code TOKEN_OFF): stop when it is yours.
+ *   if (!report.ok || report.items.some((i) => i.code === 'TOKEN_OFF' && i.name === 'escrow TAZ')) process.exit(1);
  *   // run() keeps the store's open offers listed across restarts: post an offer once, not at every start.
  *   if (!(await kit.store.listOffers()).some((o) => o.closedAt == null)) {
  *     await kit.postOffer({ side: 'sell', symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08' });
@@ -108,6 +110,14 @@ export interface KitInternals {
 
 export interface PreflightItem {
   readonly name: string;
+  /**
+   * The item passed. An item with code TOKEN_OFF passes too: the escrow
+   * takes no locks of that token on this network (its admin has not allowed
+   * it yet, its largest lock reads 0), which is a state, not a failure. The
+   * kit cannot trade that token here, and its lock checks refuse it before
+   * anything is signed; a bot that trades it should not start (the example
+   * bots do not).
+   */
   readonly ok: boolean;
   readonly text: string;
   readonly code?: string;
@@ -115,7 +125,12 @@ export interface PreflightItem {
 
 export interface PreflightReport {
   readonly network: Network;
-  /** Every item passed. */
+  /**
+   * Every item passed. A token the escrow does not take on this network
+   * (an item with code TOKEN_OFF) does not make this false, so
+   * `if (!report.ok) process.exit(1)` does not stop a bot that never
+   * trades it; a bot that does trades it should look for that item.
+   */
   readonly ok: boolean;
   readonly address: Readonly<{ pha: string; base: `0x${string}` }>;
   readonly items: readonly PreflightItem[];
@@ -310,7 +325,10 @@ function makeKit(x: {
   return Object.freeze(kit);
 }
 
-/** Pins, vectors, paused, fee, bounds, caps, balances, clock skew (section 6.3). Reads only; a failed read is a failed item. */
+/**
+ * Pins, vectors, paused, fee, bounds, caps, balances, clock skew (section 6.3). Reads only; a failed read is a failed
+ * item. A token the escrow takes no locks of on this network is an item that passes, with code TOKEN_OFF.
+ */
 async function preflight(x: { network: Network; keys: LoadedKeys; board: BoardClient; pha: PhaReader; base: BaseReader; deps: checks.CheckDeps; cfg: P2PNetConfig; now: () => number }): Promise<PreflightReport> {
   const items: PreflightItem[] = [];
   const add = (name: string, p: checks.Problem | null, okText: string) => items.push(Object.freeze(p ? { name, ok: false, text: p.text, code: p.code } : { name, ok: true, text: okText }));
@@ -333,9 +351,14 @@ async function preflight(x: { network: Network; keys: LoadedKeys; board: BoardCl
     if (!t.enabled) continue;
     try {
       const [pp, cap] = await Promise.all([x.pha.readParams(cfg, t.symbol), x.pha.readOpenCap(cfg, t.symbol)]);
-      const bad = pp.paused ? 'New locks are paused.' : pp.maxAmount === 0n ? 'The escrow takes no locks of this token.' : (pp.minAmount !== t.min || pp.maxAmount !== t.max) ? 'The escrow\'s bounds are not the ones this kit checks for.' : null;
+      // A token the escrow's admin has not allowed on this network yet (its largest lock reads 0) is a state, not a
+      // failure: a new token joins the kit's table before every network takes it, and bots that never trade it must
+      // still start. Paused locks and bounds other than the table's stay failures.
+      const off = !pp.paused && pp.maxAmount === 0n;
+      const bad = pp.paused ? 'New locks are paused.' : (pp.minAmount !== t.min || pp.maxAmount !== t.max) ? 'The escrow\'s bounds are not the ones this kit checks for.' : null;
       const room = cap.maxOpen > cap.openAmount ? cap.maxOpen - cap.openAmount : 0n;
-      if (bad) fail(`escrow ${t.symbol}`, bad);
+      if (off) items.push(Object.freeze({ name: `escrow ${t.symbol}`, ok: true, code: 'TOKEN_OFF', text: `The escrow takes no locks of ${t.symbol} on this network, so the kit cannot trade it here. Other tokens are not affected.` }));
+      else if (bad) fail(`escrow ${t.symbol}`, bad);
       else items.push(Object.freeze({ name: `escrow ${t.symbol}`, ok: true, text: `Per lock ${amountText(t.min, t.decimals)} to ${amountText(t.max, t.decimals)} ${t.symbol}; open-cap room ${amountText(room, t.decimals)} ${t.symbol}.` }));
     } catch (e) {
       fail(`escrow ${t.symbol}`, `Could not read the escrow's settings for ${t.symbol} (${errorText(e)}).`);

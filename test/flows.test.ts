@@ -219,6 +219,7 @@ class FakePha implements PhaRpc {
   admin: string = CFG.phaAdmin;
   locks = new Map<string, FakeLock>();
   bounds: Record<string, { min: bigint; max: bigint }> = Object.fromEntries(P2P_TOKENS.map((t) => [t.symbol, { min: t.min, max: t.max }]));
+  paused = false;
   bals = new Map<string, PhaBalance[]>();
   sent: string[] = [];
   states = new Map<string, PhaTxState>();
@@ -247,7 +248,7 @@ class FakePha implements PhaRpc {
       case 'getCreated': return lock() ? String(lock()!.created) : null;
       case 'getSecret': { const s = lock()?.secret; return s ? hexToDecimal(s) : null; }
       case 'getAdmin': return this.admin;
-      case 'getPaused': return '0';
+      case 'getPaused': return this.paused ? '1' : '0';
       case 'getMinLock': return '600';
       case 'getMaxLock': return '7200';
       case 'getMinAmount': return String(this.bounds[c.args[0]!]?.min ?? 0n);
@@ -1850,6 +1851,38 @@ describe('preflight and the kit object', () => {
     assert.equal(r2.items.find((i) => i.name === 'clock')?.code, 'CLOCK_SKEW', 'a clock 10 minutes off is reported');
   });
 
+  test('preflight: a token the escrow does not take on this network passes with code TOKEN_OFF; paused locks and other bounds still fail', async () => {
+    const w = world();
+    const h = await kitFor(w, await newBot(w));
+    w.pha.bounds.C = { min: 0n, max: 0n };
+    const rep = await h.kit.preflight();
+    assert.equal(rep.ok, true, JSON.stringify(rep.items.filter((i) => !i.ok)));
+    assert.deepEqual(rep.items.find((i) => i.name === 'escrow C'), {
+      name: 'escrow C', ok: true, code: 'TOKEN_OFF', text: 'The escrow takes no locks of C on this network, so the kit cannot trade it here. Other tokens are not affected.'
+    });
+    assert.equal(rep.items.find((i) => i.name === 'escrow TAZ')?.code, undefined, 'other tokens are not affected');
+    // Paused: every token's item fails, an off one too.
+    w.pha.paused = true;
+    const paused = await h.kit.preflight();
+    assert.equal(paused.ok, false);
+    assert.deepEqual(paused.items.filter((i) => i.name.startsWith('escrow ')).map((i) => [i.name, i.ok, i.code, i.text]),
+      P2P_TOKENS.filter((t) => t.enabled).map((t) => [`escrow ${t.symbol}`, false, undefined, 'New locks are paused.']));
+    w.pha.paused = false;
+    // Bounds that are not the table's (a largest lock above 0) fail, as before.
+    const c = P2P_TOKENS.find((t) => t.symbol === 'C')!;
+    w.pha.bounds.C = { min: c.min, max: c.max - 1n };
+    const wrong = await h.kit.preflight();
+    assert.equal(wrong.ok, false);
+    assert.deepEqual(wrong.items.find((i) => i.name === 'escrow C'), { name: 'escrow C', ok: false, text: 'The escrow\'s bounds are not the ones this kit checks for.' });
+    // A smallest lock above 0 with a largest lock of 0 is still off, not a failure.
+    w.pha.bounds.C = { min: c.min, max: 0n };
+    assert.equal((await h.kit.preflight()).items.find((i) => i.name === 'escrow C')?.code, 'TOKEN_OFF');
+    // The table's bounds again: C is taken and the report passes.
+    w.pha.bounds.C = { min: c.min, max: c.max };
+    assert.equal((await h.kit.preflight()).ok, true);
+    assert.equal(w.pha.sent.length + w.base.sent.length, 0, 'reads only');
+  });
+
   test('run() twice at once, and close() while running, are refused; close() after run() ends releases the data directory', async () => {
     const w = world();
     const bot = await newBot(w);
@@ -2047,7 +2080,7 @@ describe('audit: time limits, check 14 before a report, the manual accept, and t
     // The sample this test follows, line by line.
     for (const line of [
       "phaKeyFile: './keys/mybot-pha.json',", "baseKeyFile: './keys/mybot-base.json',", "dataDir: './data/mybot',",
-      'if (!report.ok) {', 'process.exit(1);',
+      "const off = report.items.filter((i) => i.code === 'TOKEN_OFF' && i.name === 'escrow TAZ');", 'if (!report.ok || off.length) {', 'process.exit(1);',
       'const open = (await kit.store.listOffers()).filter((o) => o.closedAt == null);',
       "if (!open.some((o) => o.side === 'sell' && o.symbol === 'TAZ')) {",
       "await kit.postOffer({ side: 'sell', symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08' });",
@@ -2069,6 +2102,7 @@ describe('audit: time limits, check 14 before a report, the manual accept, and t
       kits.push(kit);
       const report = await kit.preflight();
       assert.equal(report.ok, true, JSON.stringify(report.items.filter((i) => !i.ok)));
+      assert.deepEqual(report.items.filter((i) => i.code === 'TOKEN_OFF' && i.name === 'escrow TAZ'), [], 'the sample goes on');
       const open = (await kit.store.listOffers()).filter((o) => o.closedAt == null);
       if (!open.some((o) => o.side === 'sell' && o.symbol === 'TAZ')) {
         await kit.postOffer({ side: 'sell', symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08' });
@@ -2077,6 +2111,13 @@ describe('audit: time limits, check 14 before a report, the manual accept, and t
     };
     // First start, then a crash and a second start: the offer kept in the store is the one run() lists; none is added.
     const first = await start();
+    // While the escrow takes no TAZ, the report passes but the sample's own check finds the item that stops it.
+    const taz = w.pha.bounds.TAZ!;
+    w.pha.bounds.TAZ = { min: taz.min, max: 0n };
+    const offRep = await first.preflight();
+    assert.equal(offRep.ok, true);
+    assert.equal(offRep.items.filter((i) => i.code === 'TOKEN_OFF' && i.name === 'escrow TAZ').length, 1);
+    w.pha.bounds.TAZ = taz;
     await first.close();
     kits.splice(kits.indexOf(first), 1);
     const kit = await start();

@@ -26,7 +26,7 @@ and relays messages. Liquidity on the board comes from people and their bots.
 ## Try it in one command
 
 Saturn's P2P board (https://ops.saturnx.cc/p2p) is where people trade
-Phantasma tokens (TAZ, RA, SOUL, KCAL) for USDC on Base. Each trade is an
+Phantasma tokens (C, RA, TAZ, SOUL, KCAL) for USDC on Base. Each trade is an
 atomic swap: the seller locks its tokens on Phantasma and the buyer locks its
 USDC on Base, both behind the hash of one secret. The seller's claim of the
 USDC reveals the secret, which lets the buyer claim the tokens; a lock that
@@ -306,11 +306,14 @@ terminal) so that they use it. `npm run seller -- <options>` does what
 ## Get the kit
 
 This repository holds the kit and `start.sh`. The Saturn site also publishes
-the kit as one file, together with its SHA-256, but that file is an older
-version, 0.1.4: it has no `start.sh`, no market bot (`examples/market-bot.ts`,
+the kit as one file, together with its SHA-256. That file can be an older
+version than this repository: its `package.json` names its version. A site
+file older than 0.3.0 (the site published 0.1.4 before it took up 0.3.0)
+has no `start.sh`, no market bot (`examples/market-bot.ts`,
 `npm run market`) and no `LICENSE` file, and its README has none of the
-notices above. For mainnet and the market bot, use this repository. To fetch
-and check the site's file:
+notices above. For mainnet and the market bot,
+use this repository, or a site file of version 0.3.0 or later. To fetch and
+check the site's file:
 
 ```
 curl -fsSLO https://ops.saturnx.cc/downloads/saturn-p2p-bot-kit.tgz
@@ -348,9 +351,8 @@ To upgrade, download the new version and its `.sha256`, check it with
 again. The download never contains `keys/` or `data/`: keep them outside the
 unpacked folder (absolute paths in your config), or copy them across from
 the old folder. `examples/README.md` ("Upgrading the kit") has the steps.
-That is for the site's file, which is still 0.1.4: a kit from this
-repository upgrades with `git pull` (or a new ZIP) instead, as "Where things
-are" above says.
+That is for the site's file: a kit from this repository upgrades with
+`git pull` (or a new ZIP) instead, as "Where things are" above says.
 
 ## Quick start on devnet
 
@@ -389,8 +391,10 @@ const kit = await createKit({
 });
 
 const report = await kit.preflight();    // reads only: pins, contracts, balances, clock
-if (!report.ok) {
-  console.log(report.items.filter((i) => !i.ok));
+// A token the escrow does not take on this network yet passes the report (code TOKEN_OFF): stop when it is yours.
+const off = report.items.filter((i) => i.code === 'TOKEN_OFF' && i.name === 'escrow TAZ');
+if (!report.ok || off.length) {
+  console.log(report.items.filter((i) => !i.ok), off);
   await kit.close();
   process.exit(1);
 }
@@ -440,7 +444,7 @@ as `run()` does, so an offer or a take whose answer was lost is still found.
 
 | Call | What it does |
 |---|---|
-| `preflight()` | Reads the pins, the escrow's code and admin, the SHA-256 vectors, SaturnSwap, the escrow's settings per token, your balances and the clock. Sends nothing. |
+| `preflight()` | Reads the pins, the escrow's code and admin, the SHA-256 vectors, SaturnSwap, the escrow's settings per token, your balances and the clock. Sends nothing. `ok` is false when any item fails. A token the escrow does not take on this network yet (its largest lock reads 0) is an item that passes, with `code: 'TOKEN_OFF'`: the kit cannot trade that token there (its lock checks refuse it before anything is signed), and bots that trade other tokens still start. A bot that trades that token should not start; the example bots print it as `preflight off` and stop when their config uses it. |
 | `postOffer(o)` | Checks the offer against the kit's own token table, posts it with a control token kept on disk first, and cancels it at once if the board lists it differently from what was posted. `follow: { offsetBps, limitPrice }` posts an offer that follows the reference price, never past `limitPrice`. `mode: 'instant'` posts a sell offer whose buyer locks first ("Instant offers" below). |
 | `take(offerId, amount)` | Takes one offer at the price the kit read; the trade record keeps that price. If the offer's price changed meanwhile, the board refuses and nothing is taken. |
 | `buyUpTo` / `sellDownTo` | Splits an order across the best offers at or better than your price, at most 5 trades by default. A trade the board answers past your price is never locked (`PRICE_LIMIT`). |
