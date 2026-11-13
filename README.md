@@ -141,8 +141,9 @@ Closing that terminal then does not stop the bot; `kill` with its process
 id (`pgrep -f market-bot` shows it) stops it cleanly, as Ctrl-C once does.
 Started with `&` but with the terminal as its input, it stops at the
 question instead. For a bot that runs for days, a service manager (systemd,
-launchd) or a tmux session suits better. `sh start.sh mainnet dry-run`
-sends nothing and needs no answer.
+launchd) or a tmux session suits better, or a container: `docs/RAILWAY.md`
+runs the kit on Railway, or on any Docker host, with its keys and state on
+a volume. `sh start.sh mainnet dry-run` sends nothing and needs no answer.
 
 ### Good to know
 
@@ -220,6 +221,7 @@ screen session) names the network: `sh start.sh devnet`. `seller`, `buyer` and `
 | `market.mainnet.json` | The market bot's config on mainnet, your own: `start.sh` writes it, with no offers, only when it is missing. |
 | `.node/` | The Node that `start.sh` downloaded, if it did. To use it for the `npm` and `npx` commands in this README, first run `export PATH="$PWD/.node/bin:$PATH"` in the kit's folder (once per terminal). |
 | `examples/` | The bots and their configs (`seller.devnet.example.json`, `buyer.devnet.example.json`, and the market bot's template `market.mainnet.example.json`). |
+| `Dockerfile`, `docker/` | The kit as a container image, for Railway or any Docker host: `docs/RAILWAY.md`. In a container, `keys/`, `data/` and `market.mainnet.json` are on its volume. |
 
 `git pull` brings a new version of the kit and leaves `keys/`, `data/`,
 `market.mainnet.json` and `.node/` as they are. With the ZIP, download the

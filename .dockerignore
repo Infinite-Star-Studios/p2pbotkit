@@ -1,0 +1,16 @@
+# Nothing of a working folder's keys, state or secrets may ever reach an image: what .gitignore keeps
+# out of a commit, at any depth (here that takes **/).
+**/keys
+**/data
+**/store.key
+**/*.key
+**/api-key*
+**/market.mainnet.json
+
+# Made again in the image, or not needed in it.
+**/node_modules
+.node
+.node-download
+.git
+test
+brand
