@@ -19,7 +19,9 @@
 #   KIT_MARKET_CONFIG    mainnet: the market bot's whole config, as JSON text. Written to
 #                        market.mainnet.json on the volume at each start. Without it, the file on the
 #                        volume is used as it is
-#   KIT_ALLOW_MAINNET    1: start.sh's own switch for a mainnet start that nobody can answer yes to
+#   KIT_ALLOW_MAINNET    1: start.sh's own switch for a mainnet start that nobody can answer yes to.
+#                        While it is set, no start makes a new key pair: a first start on a volume
+#                        that holds no mainnet key is refused
 #   KIT_HOLD             1: start no bot; keep the container running, to open a shell in it
 #   KIT_STATE_DIR        the volume's folder (default: RAILWAY_VOLUME_MOUNT_PATH on Railway, else /data)
 #   KIT_CLEAR_LOCKS      1: remove every lock file a bot that is gone left on the volume; 0: leave them
@@ -342,10 +344,18 @@ write_market_config() {
     return 1
   fi
   if why=$(check_config "$new" mainnet); then
-    if mv -f "$new" "$CONFIG" 2>/dev/null; then
+    # start.sh and the bot look for open offers and trades in the data folder their config names,
+    # and nowhere else. A config that names another one leaves those of the old folder unseen and
+    # unfinished, and start.sh would call the bot idle. Not through a variable, then.
+    was=$(on_volume_check data-dir "$CONFIG" 2>/dev/null) || was=''
+    wants=$(on_volume_check data-dir "$new" 2>/dev/null) || wants=''
+    if [ -n "$was" ] && [ "$was" != "$wants" ] && [ -d "$was/mainnet" ]; then
+      why="its \"dataDir\" is $wants, and the config it replaces has $was, which holds the market bot's saved state: the offers and trades still open there would not be looked at, and not finished. Keep the \"dataDir\" as it is. To move the bot to another data folder on purpose, put the config on the volume as a file and remove KIT_MARKET_CONFIG"
+    elif mv -f "$new" "$CONFIG" 2>/dev/null; then
       return 0
+    else
+      why="it could not be put in the place of $CONFIG"
     fi
-    why="it could not be put in the place of $CONFIG"
   fi
   rm -f "$new"
   printf '%s\n' "${why:-it could not be checked (is Node there?)}"
@@ -384,8 +394,15 @@ mainnet_config() {
   # A config half written by a start that was cut short.
   rm -f "$CONFIG".new.[0-9]*
   if [ ! -e "$CONFIG" ] && [ ! -L "$CONFIG" ]; then
-    # The first start on this volume: start.sh's own setup makes the market bot's key pair
-    # (in ./keys/mainnet, on the volume) and its config, which lists nothing.
+    # The first start on this volume. With the yes given already and no key on the volume, this
+    # is not a new bot: the volume was replaced or wiped, or the service was copied, variables
+    # and all, into another environment. A start would make a new key pair and run the market
+    # bot on it, while the bot's own keys, their funds and its open trades are somewhere else.
+    if [ "${KIT_ALLOW_MAINNET:-}" = 1 ] && [ -z "$(find "$STATE/keys/mainnet" \( -type f -o -type l \) 2>/dev/null | head -n 1)" ]; then
+      die "this volume has no market.mainnet.json and no mainnet key, and KIT_ALLOW_MAINNET=1 is set already: a start would make a new key pair and run the market bot on it. If this bot has run before, its keys and its open trades are on another volume: attach that one. For a new bot, remove KIT_ALLOW_MAINNET until the first start has made the key pair and you have seen a dry run (docs/RAILWAY.md, \"On mainnet\"). No key was made"
+    fi
+    # start.sh's own setup makes the market bot's key pair (in ./keys/mainnet, on the volume) and
+    # its config, which lists nothing.
     rm -f "$KIT_DIR/market.mainnet.json"
     sh "$KIT_DIR/start.sh" mainnet setup </dev/null
     [ -f "$KIT_DIR/market.mainnet.json" ] || die "start.sh mainnet setup made no market.mainnet.json"
@@ -444,11 +461,13 @@ if [ "${KIT_HOLD:-}" = 1 ]; then
   elif [ "$NET" = mainnet ]; then
     say "There is no market.mainnet.json on the volume yet. A start without KIT_HOLD makes it, and the market bot's key pair with it; one made in this shell (sh start.sh mainnet setup) stays in this container."
   fi
-  # A sleep in the background, so that a SIGTERM ends the wait at once: it takes the sleep with it.
+  # A sleep in the background, so that a SIGTERM ends the wait at once and takes the sleep with
+  # it. Short naps: a sleep that the signal missed (it came while the sleep was being started)
+  # ends by itself soon after.
   nap=''
   trap 'kill "$nap" 2>/dev/null || :; exit 0' TERM INT
   while :; do
-    sleep 3600 &
+    sleep 15 &
     nap=$!
     wait "$nap" || :
   done
