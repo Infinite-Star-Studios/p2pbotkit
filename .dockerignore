@@ -5,7 +5,10 @@
 **/store.key
 **/*.key
 **/api-key*
+**/*-pha.json
+**/*-base.json
 **/market.mainnet.json
+**/.env*
 
 # Made again in the image, or not needed in it.
 **/node_modules

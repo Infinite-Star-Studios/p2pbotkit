@@ -13,6 +13,11 @@ store.key
 *.key
 api-key*
 
+# A key file is a secret wherever a copy of it lies (new-keys.ts names them
+# <name>-pha.json and <name>-base.json).
+*-pha.json
+*-base.json
+
 # The kit's lockfile IS tracked: start.sh and the quick start install exactly
 # these versions with `npm ci --ignore-scripts`.
 !package-lock.json

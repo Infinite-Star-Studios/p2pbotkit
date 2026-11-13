@@ -7,8 +7,9 @@
 ARG NODE_IMAGE=node:22.23.5-bookworm-slim
 FROM ${NODE_IMAGE}
 
-# ps (procps): start.sh uses it to see that a bot has exited. tini: the container's first process,
-# which passes SIGTERM on to start.sh and the bots, so a stop is their clean stop.
+# procps: ps, which start.sh uses to see that a bot has exited, and pkill, to stop a bot from a
+# shell. tini: the image's first process, which passes SIGTERM on to start.sh and the bots, so a
+# stop is their clean stop (-s: also where the platform runs an init of its own before it).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends procps tini \
  && rm -rf /var/lib/apt/lists/*
@@ -28,4 +29,4 @@ RUN KIT_NO_NODE_DOWNLOAD=1 sh start.sh market --help >/dev/null \
 # The image's Node is the kit's own: never download another one into a container.
 ENV KIT_NO_NODE_DOWNLOAD=1
 
-ENTRYPOINT ["/usr/bin/tini", "--", "sh", "/app/docker/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "sh", "/app/docker/entrypoint.sh"]
