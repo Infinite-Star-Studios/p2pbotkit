@@ -28,4 +28,4 @@ RUN KIT_NO_NODE_DOWNLOAD=1 sh start.sh market --help >/dev/null \
 # The image's Node is the kit's own: never download another one into a container.
 ENV KIT_NO_NODE_DOWNLOAD=1
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "sh", "/app/docker/entrypoint.sh"]

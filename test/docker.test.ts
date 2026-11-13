@@ -4,9 +4,10 @@
  * The entrypoint runs here as it runs in a container, with `sh`, in a
  * folder of its own that stands for the image's /app: a start.sh that only
  * records how it was called, a folder that stands for the volume, a folder
- * that stands for /proc (KIT_PROC_DIR), and a `stat` that says which device
- * a folder is on, so a test decides whether the volume is one. Nothing here
- * needs Docker, a network, or the kit's own packages.
+ * that stands for /proc (KIT_PROC_DIR), a `stat` that says which device a
+ * folder is on, so a test decides whether the volume is one, and a `sleep`
+ * that only notes how long it was asked to wait. Nothing here needs Docker,
+ * a network, or the kit's own packages.
  *
  *   - the volume: no start, no key and no state without one;
  *   - the links: ./keys, ./data and ./market.mainnet.json are the volume's;
@@ -16,6 +17,7 @@
  *   - mainnet: start.sh's own setup first, the config on the volume,
  *     KIT_MARKET_CONFIG;
  *   - KIT_HOLD;
+ *   - the wait before a start that follows the last one at once;
  *   - the Dockerfile, .dockerignore and the guide agree with the scripts.
  */
 import { describe, test } from 'node:test';
@@ -71,6 +73,15 @@ case "$3/" in
 esac
 `;
 
+/**
+ * sleep's stand-in, first on the PATH: it notes the time it was asked to wait in FAKE_SLEEPS and returns at once,
+ * so a test of the wait between starts takes no time. With FAKE_SLEEP_REAL=1 it is the real sleep (KIT_HOLD's).
+ */
+const FAKE_SLEEP = `#!/bin/sh
+if [ "\${FAKE_SLEEP_REAL:-}" = 1 ]; then exec /bin/sleep "$@"; fi
+printf '%s\\n' "$1" >>"$FAKE_SLEEPS"
+`;
+
 interface Call {
   args: string[];
   cwd: string;
@@ -88,6 +99,8 @@ interface Box {
   /** Stands for /proc. */
   proc: string;
   record: string;
+  /** The waits the entrypoint asked for, one per row. */
+  sleeps: string;
   entrypoint: string;
 }
 
@@ -100,7 +113,7 @@ async function box(): Promise<Box> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'kit-docker-')));
   made.push(root);
   const kit = join(root, 'app');
-  const b: Box = { kit, state: join(root, 'volume'), proc: join(root, 'proc'), record: join(root, 'calls.jsonl'), entrypoint: join(kit, 'docker', 'entrypoint.sh') };
+  const b: Box = { kit, state: join(root, 'volume'), proc: join(root, 'proc'), record: join(root, 'calls.jsonl'), sleeps: join(root, 'sleeps'), entrypoint: join(kit, 'docker', 'entrypoint.sh') };
   await mkdir(join(kit, 'docker'), { recursive: true });
   await mkdir(b.state);
   await mkdir(b.proc);
@@ -109,6 +122,7 @@ async function box(): Promise<Box> {
   await writeFile(join(kit, 'fake-start.cjs'), FAKE_START_CJS);
   await mkdir(join(root, 'bin'));
   await writeFile(join(root, 'bin', 'stat'), FAKE_STAT, { mode: 0o755 });
+  await writeFile(join(root, 'bin', 'sleep'), FAKE_SLEEP, { mode: 0o755 });
   return b;
 }
 
@@ -120,7 +134,7 @@ const NOWHERE = '/nowhere';
  * on a device of its own (a volume) unless a test says otherwise.
  */
 function envOf(b: Box, extra: Record<string, string> = {}): Record<string, string> {
-  const env: Record<string, string> = { PATH: `${join(b.kit, '..', 'bin')}:${process.env.PATH ?? ''}`, FAKE_RECORD: b.record, FAKE_VOLUME: b.state, KIT_STATE_DIR: b.state, KIT_PROC_DIR: b.proc };
+  const env: Record<string, string> = { PATH: `${join(b.kit, '..', 'bin')}:${process.env.PATH ?? ''}`, FAKE_RECORD: b.record, FAKE_VOLUME: b.state, FAKE_SLEEPS: b.sleeps, KIT_STATE_DIR: b.state, KIT_PROC_DIR: b.proc };
   for (const [k, v] of Object.entries(extra)) {
     if (v === '') delete env[k];
     else env[k] = v;
@@ -136,6 +150,11 @@ function run(b: Box, args: string[] = [], extra: Record<string, string> = {}): {
 async function calls(b: Box): Promise<Call[]> {
   if (!existsSync(b.record)) return [];
   return (await readFile(b.record, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l) as Call);
+}
+
+/** The waits asked for so far, in seconds. */
+async function sleepsOf(b: Box): Promise<string[]> {
+  return existsSync(b.sleeps) ? (await readFile(b.sleeps, 'utf8')).split('\n').filter(Boolean) : [];
 }
 
 const modeOf = async (f: string) => ((await stat(f)).mode & 0o777).toString(8);
@@ -371,6 +390,15 @@ describe('docker/entrypoint.sh: locks left by an earlier container', { skip }, (
       assert.ok(existsSync(f), exe);
       assert.match(r.out, /A Node process runs in this container already, so the lock files on .* are left as they are\./);
     }
+    // A process whose program cannot be read (another user's) is known by the name it was started under.
+    const other = await box();
+    const kept = await lockIn(join(other.state, 'data', 'seller', 'devnet'));
+    await mkdir(join(other.proc, '41'));
+    await writeFile(join(other.proc, '41', 'cmdline'), '/usr/local/bin/node\0--import\0tsx\0examples/seller-bot.ts\0');
+    await mkdir(join(other.proc, '2'));
+    await writeFile(join(other.proc, '2', 'cmdline'), '');
+    assert.equal(run(other).code, 0);
+    assert.ok(existsSync(kept), 'a Node known by its command line');
     // Where there is a /proc (Linux), the real one shows this test's own Node process.
     if (existsSync('/proc/self/exe')) {
       const b = await box();
@@ -441,7 +469,13 @@ describe('docker/entrypoint.sh: mainnet, the market bot\'s config on the volume'
     }
     assert.equal(run(b, [], { KIT_NETWORK: 'mainnet' }).code, 0);
     assert.equal(await readFile(config, 'utf8'), `${CONFIG}\n`, 'without the variable, the file on the volume is used as it is');
-    assert.deepEqual((await readdir(b.state)).sort(), ['data', 'keys', 'market.mainnet.json'], 'no temporary file is left');
+    const onVolume = async () => (await readdir(b.state)).filter((n) => n !== '.last-start').sort();
+    assert.deepEqual(await onVolume(), ['data', 'keys', 'market.mainnet.json'], 'no temporary file is left');
+    // A config half written by a start that was cut short is cleared away, never used.
+    await writeFile(`${config}.new.4242`, '{"network": "mainn');
+    assert.equal(run(b, [], { KIT_NETWORK: 'mainnet' }).code, 0);
+    assert.deepEqual(await onVolume(), ['data', 'keys', 'market.mainnet.json']);
+    assert.equal(await readFile(config, 'utf8'), `${CONFIG}\n`);
   });
 
   test('on devnet none of this happens; help on mainnet makes nothing; a config inside the image is refused', async () => {
@@ -461,7 +495,7 @@ describe('docker/entrypoint.sh: KIT_HOLD=1', { skip }, () => {
   test('starts no bot, keeps running for a shell, and ends at once on SIGTERM with exit 0', async () => {
     const b = await box();
     const f = await lockIn(join(b.state, 'data', 'seller', 'devnet'));
-    const child = spawn('sh', [b.entrypoint], { env: envOf(b, { KIT_HOLD: '1', KIT_NETWORK: 'mainnet' }), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('sh', [b.entrypoint], { env: envOf(b, { KIT_HOLD: '1', KIT_NETWORK: 'mainnet', FAKE_SLEEP_REAL: '1' }), stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
     const ended = new Promise<number | null>((res) => child.on('exit', (code) => res(code)));
@@ -473,10 +507,75 @@ describe('docker/entrypoint.sh: KIT_HOLD=1', { skip }, () => {
     assert.equal(await readlink(join(b.kit, 'keys')), join(b.state, 'keys'), 'the links are there for the shell');
     assert.ok(!existsSync(join(b.kit, 'market.mainnet.json')) && !existsSync(join(b.state, 'market.mainnet.json')), 'no setup: no key and no config are made on hold');
     assert.ok(!existsSync(f), 'leftover locks are removed all the same');
+    assert.ok(!existsSync(join(b.state, '.last-start')), 'a hold is not a start');
     const at = Date.now();
     child.kill('SIGTERM');
     assert.equal(await ended, 0);
     assert.ok(Date.now() - at < 5_000);
+  });
+});
+
+describe('docker/entrypoint.sh: a start right after the last one', { skip }, () => {
+  const nowS = () => Math.floor(Date.now() / 1000);
+  const markOf = async (b: Box) => (await readFile(join(b.state, '.last-start'), 'utf8')).trim().split(' ');
+
+  test('a first start, and a start after a run of half a minute or more, wait for nothing and leave their mark on the volume', async () => {
+    const b = await box();
+    const before = nowS();
+    const r = run(b);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(await sleepsOf(b), []);
+    const [at, row] = await markOf(b);
+    assert.ok(Number(at) >= before && Number(at) <= nowS() + 1, `the mark is the time of the start (${at})`);
+    assert.equal(row, '0');
+    // The last start was long ago, whatever came before it: the row starts again.
+    await writeFile(join(b.state, '.last-start'), `${nowS() - 31} 7\n`);
+    assert.equal(run(b).code, 0);
+    assert.deepEqual(await sleepsOf(b), []);
+    assert.equal((await markOf(b))[1], '0');
+    assert.equal((await calls(b)).length, 2);
+  });
+
+  test('starts that follow each other within half a minute wait 5, 10, 20, 40 and then 60 seconds, and say so', async () => {
+    const b = await box();
+    for (const [row, pause] of [[0, '5'], [1, '10'], [2, '20'], [3, '40'], [4, '60'], [5, '60'], [41, '60']] as const) {
+      await rm(b.sleeps, { force: true });
+      await writeFile(join(b.state, '.last-start'), `${nowS() - 3} ${row}\n`);
+      const r = run(b, [], { FAKE_EXIT: '1' });
+      assert.equal(r.code, 1);
+      assert.deepEqual(await sleepsOf(b), [pause], `after ${row + 1} start(s) in a row`);
+      assert.match(r.out, new RegExp(`The last start was [0-9]+ s ago \\(start ${row + 2} in a row\\): waiting ${pause} s before this one\\.`));
+      assert.equal((await markOf(b))[1], String(row + 1));
+    }
+    // The real thing, with no mark written by hand: a bot that fails at once, started three times.
+    const c = await box();
+    for (let i = 0; i < 3; i++) assert.equal(run(c, [], { FAKE_EXIT: '1' }).code, 1);
+    assert.deepEqual(await sleepsOf(c), ['5', '10']);
+    assert.equal((await calls(c)).length, 3, 'every start still runs start.sh');
+  });
+
+  test('a mark that cannot be read, or from a clock that has since been set back, makes no start wait and is written anew', async () => {
+    const b = await box();
+    for (const mark of ['', 'not a time\n', '-5 2\n', `${nowS() - 3}x 1\n`, `${nowS() + 600} 3\n`, `${nowS() - 3} many\n`]) {
+      await rm(b.sleeps, { force: true });
+      await writeFile(join(b.state, '.last-start'), mark);
+      const r = run(b);
+      assert.equal(r.code, 0, mark);
+      // A time that reads, with a count that does not, still counts as a start a moment ago: the first wait.
+      assert.deepEqual(await sleepsOf(b), mark.endsWith('many\n') ? ['5'] : [], JSON.stringify(mark));
+      assert.match((await readFile(join(b.state, '.last-start'), 'utf8')), /^[0-9]+ [0-9]+\n$/);
+    }
+  });
+
+  test('help waits for nothing and leaves no mark', async () => {
+    const b = await box();
+    assert.equal(run(b, ['help']).code, 0);
+    assert.ok(!existsSync(join(b.state, '.last-start')), 'no mark');
+    const mark = `${nowS() - 3} 2\n`;
+    await writeFile(join(b.state, '.last-start'), mark);
+    assert.equal(run(b, ['help']).code, 0);
+    assert.deepEqual(await sleepsOf(b), []);
+    assert.equal(await readFile(join(b.state, '.last-start'), 'utf8'), mark, 'the mark is as it was');
   });
 });
 
@@ -496,7 +595,8 @@ describe('the image and its guide', { skip }, () => {
     // Railway takes no VOLUME instruction, and an unnamed volume would hide a missing one from the entrypoint.
     assert.doesNotMatch(lines, /^\s*VOLUME\b/m);
     assert.doesNotMatch(lines, /^\s*(USER|CMD)\b/m);
-    assert.match(lines, /^ENTRYPOINT \["\/usr\/bin\/tini", "--", "\/app\/docker\/entrypoint\.sh"\]$/m);
+    // Through sh, as start.sh is run: the entrypoint does not depend on the mode a checkout gave its file.
+    assert.match(lines, /^ENTRYPOINT \["\/usr\/bin\/tini", "--", "sh", "\/app\/docker\/entrypoint\.sh"\]$/m);
     assert.match(lines, /apt-get install -y --no-install-recommends procps tini/);
     assert.match(lines, /^WORKDIR \/app$/m);
     assert.ok(((await stat(kitFile('docker/entrypoint.sh'))).mode & 0o111) !== 0, 'the entrypoint can be executed');

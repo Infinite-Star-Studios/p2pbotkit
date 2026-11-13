@@ -7,7 +7,8 @@
 #   2. links the kit's ./keys, ./data and ./market.mainnet.json to the volume;
 #   3. removes the lock files that a bot in an earlier container left on the volume, which the kit
 #      would otherwise take for a bot on another machine and refuse to start;
-#   4. runs "sh start.sh <network> ..." with no terminal on its input.
+#   4. waits a little before a start that follows the last one at once (a bot that keeps failing);
+#   5. runs "sh start.sh <network> ..." with no terminal on its input.
 #
 # From the environment:
 #   KIT_NETWORK          devnet (the default) or mainnet
@@ -102,8 +103,13 @@ PROC=${KIT_PROC_DIR:-/proc}
 
 node_runs() {
   for p in "$PROC"/[0-9]*; do
-    case "$(readlink "$p/exe" 2>/dev/null || :)" in
-      */node | */node\ *) return 0 ;;
+    exe=$(readlink "$p/exe" 2>/dev/null || :)
+    if [ -z "$exe" ] && [ -r "$p/cmdline" ]; then
+      # A process whose program cannot be read here (another user's): the name it was started under.
+      exe=$(tr '\0' '\n' <"$p/cmdline" 2>/dev/null | head -n 1 || :)
+    fi
+    case "$exe" in
+      node | */node | */node\ *) return 0 ;;
     esac
   done
   return 1
@@ -207,12 +213,17 @@ mainnet_config() {
   elif [ -e "$KIT_DIR/market.mainnet.json" ]; then
     die "$KIT_DIR/market.mainnet.json is in the image. The market bot's config lives on the volume ($CONFIG) or in KIT_MARKET_CONFIG: take it out of the image"
   fi
+  # A config half written by a start that was cut short.
+  rm -f "$CONFIG".new.*
   if [ ! -e "$CONFIG" ] && [ ! -L "$CONFIG" ]; then
     # The first start on this volume: start.sh's own setup makes the market bot's key pair
     # (in ./keys/mainnet, on the volume) and its config, which lists nothing.
     sh "$KIT_DIR/start.sh" mainnet setup </dev/null
     [ -f "$KIT_DIR/market.mainnet.json" ] || die "start.sh mainnet setup made no market.mainnet.json"
-    mv "$KIT_DIR/market.mainnet.json" "$CONFIG"
+    # Onto the volume whole or not at all: a copy beside it, then a rename.
+    cp "$KIT_DIR/market.mainnet.json" "$CONFIG.new.$$"
+    mv -f "$CONFIG.new.$$" "$CONFIG"
+    rm -f "$KIT_DIR/market.mainnet.json"
     say ""
     say "In this container the market bot's config is $CONFIG, on the volume. Set it with the KIT_MARKET_CONFIG variable, or put your own file there (docs/RAILWAY.md)."
   fi
@@ -236,6 +247,61 @@ if [ "$NET" = mainnet ]; then
     *) mainnet_config ;;
   esac
 fi
+
+# ── A start right after the last one ─────────────────────────────────────────
+
+# A bot that stops on an error (the board or an RPC that does not answer, say) is started again
+# by the platform at once: ten times on Railway, and then no more. So a start that comes within
+# half a minute of the last one waits first, a little longer each time (5 s, then 10, 20, 40, and
+# 60 from then on). Ten starts then last minutes, not seconds: a short outage passes, a recurring
+# order is not sent ten times in a row, and a board that limits requests is not asked again at
+# once. A start after a run of half a minute or more waits for nothing.
+STAMP=$STATE/.last-start
+
+wait_if_restarting() {
+  now=$(date +%s 2>/dev/null || :)
+  case "$now" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  last=''
+  row=''
+  if [ -f "$STAMP" ]; then
+    read -r last row <"$STAMP" 2>/dev/null || :
+  fi
+  case "$last" in
+    '' | *[!0-9]*) last=0 ;;
+  esac
+  case "$row" in
+    '' | *[!0-9]*) row=0 ;;
+  esac
+  if [ "$last" -gt 0 ] && [ "$now" -ge "$last" ] && [ $((now - last)) -lt 30 ]; then
+    row=$((row + 1))
+    case "$row" in
+      1) pause=5 ;;
+      2) pause=10 ;;
+      3) pause=20 ;;
+      4) pause=40 ;;
+      *) pause=60 ;;
+    esac
+    say "The last start was $((now - last)) s ago (start $((row + 1)) in a row): waiting $pause s before this one."
+    sleep "$pause"
+    now=$(date +%s 2>/dev/null || :)
+    case "$now" in
+      '' | *[!0-9]*) return 0 ;;
+    esac
+  else
+    row=0
+  fi
+  # Best effort: a start never fails for this mark.
+  if printf '%s %s\n' "$now" "$row" >"$STAMP.new.$$" 2>/dev/null; then
+    mv -f "$STAMP.new.$$" "$STAMP" 2>/dev/null || rm -f "$STAMP.new.$$"
+  fi
+}
+
+case "${1:-}" in
+  help | -h | --help) ;;
+  *) wait_if_restarting ;;
+esac
 
 # ── start.sh ─────────────────────────────────────────────────────────────────
 
