@@ -29,10 +29,14 @@ The same image runs on any Docker host ("On any Docker host" below).
 
 What Railway does is Railway's to change. The settings and commands below
 are as its documentation had them in November 2026, and its pages are linked
-where a step depends on them. Nothing here was run on Railway itself: the
-image and its entrypoint were run in containers on a Docker host. So check
-it on a project of your own, on devnet, before funds depend on it ("Check
-it once on your own project" below).
+where a step depends on them. The image and its entrypoint were tested in
+containers on a Docker host. On Railway itself three things have been seen,
+on one project in November 2026: the image builds there, a Railway volume
+at `/data` is taken for a volume, and a deploy stops the old container
+before it starts the new one (check 3 below, without draining seconds: the
+two were 2 seconds apart, each under a host name of its own). The rest is
+from Railway's pages. So make the checks on a project of your own before
+funds depend on it ("Check it once on your own project" below).
 
 ## What the image does
 
@@ -442,9 +446,10 @@ one volume, one bot" above).
 
 ## Check it once on your own project
 
-Nothing in this guide was run on Railway itself, and what Railway does can
-change. Five checks on devnet, with test tokens, show whether your project
-does what the guide says. Make them before the mainnet steps.
+Little of this guide was run on Railway itself (what was is said at its
+top), and what Railway does can change. Five checks on devnet, with test
+tokens, show whether your project does what the guide says. Make them
+before the mainnet steps.
 
 1. **The build and the volume.** The first deploy's log begins "Saturn P2P
    bot kit in a container: devnet, with its keys and state on the volume
