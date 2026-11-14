@@ -30,12 +30,16 @@ The same image runs on any Docker host ("On any Docker host" below).
 What Railway does is Railway's to change. The settings and commands below
 are as its documentation had them in November 2026, and its pages are linked
 where a step depends on them. The image and its entrypoint were tested in
-containers on a Docker host. On Railway itself three things have been seen,
-on one project in November 2026: the image builds there, a Railway volume
-at `/data` is taken for a volume, and a deploy stops the old container
-before it starts the new one (check 3 below, without draining seconds: the
-two were 2 seconds apart, each under a host name of its own). The rest is
-from Railway's pages. So make the checks on a project of your own before
+containers on a Docker host. On Railway itself these have been seen, on one
+project in November 2026: the image builds there, a Railway volume at
+`/data` is taken for a volume, and a deploy stops the old container before
+it starts the new one (check 3 below, without draining seconds: the two
+were 2 seconds apart, each under a host name of its own). The first
+mainnet start, a dry run and a market bot listing its offers ran there
+too, with the config set through the Raw Editor's JSON tab, and the key
+files were copied off the volume one at a time with `railway volume files
+download` (CLI 5.74, once an SSH key was registered). The rest is from
+Railway's pages. So make the checks on a project of your own before
 funds depend on it ("Check it once on your own project" below).
 
 ## What the image does
@@ -200,7 +204,10 @@ take the steps in this order.
    config"). Keep its `network`, `keys` and `dataDir` as they are:
    `./keys/mainnet/...` and `./data/market` are on the volume, and the
    entrypoint refuses a config without them. Do not copy the devnet
-   examples' prices: on mainnet a price is a real trade at that price. Set
+   examples' prices: on mainnet a price is a real trade at that price. In
+   the service's Variables, the Raw Editor's JSON tab takes the whole set
+   at once (`{"KIT_NETWORK": "mainnet", "KIT_MARKET_CONFIG": "{...}"}`,
+   the config as one JSON string), which keeps its quotes intact. Set
    `KIT_START_ARGS=dry-run` with it, then deploy. The logs show the
    balances, the open offers, the reference price, and what the bot would
    list and take; nothing is sent. A dry run that ends with "Dry run done"
@@ -355,10 +362,26 @@ funds off the bot's addresses only after that.
 
 ## A shell, and the files on the volume
 
-Railway's CLI (https://docs.railway.com/cli) reaches both. Update it, log
-in (`railway login`) and link a folder to the project (`railway link`). Run
-`railway ssh` once by itself first: it registers an SSH key for your
-account.
+Railway's CLI (https://docs.railway.com/cli) reaches both. Use a current
+version: an older one (4.15, for one) has neither `railway volume files`
+("unrecognized subcommand 'files'") nor `railway upgrade`, so update it
+the way it was installed (`brew upgrade railway`, or `npm i -g
+@railway/cli`; `which railway` tells which). Then log in (`railway login`) and link a
+folder to the project (`railway link`).
+
+Both reach the container over SSH, with a key registered with Railway.
+Register yours once, and if it has a passphrase, hand it to the SSH agent
+so the CLI can use it:
+
+```sh
+railway ssh keys add --key ~/.ssh/id_ed25519.pub
+```
+
+```sh
+ssh-add ~/.ssh/id_ed25519
+```
+
+`railway ssh keys` lists the keys Railway knows.
 
 - **A shell in the running container:** `railway ssh`, or one command with
   `railway ssh -- <command>` (https://docs.railway.com/cli/ssh). The
@@ -408,13 +431,19 @@ from the start:
 mkdir -p ~/kit-keys && chmod 700 ~/kit-keys
 ```
 
-Then the whole `keys` folder:
+Then the two key files, one at a time (`railway volume files list
+/keys/mainnet` shows them first; with more than one volume the CLI asks
+which):
 
 ```sh
-railway volume files download /keys ~/kit-keys
+railway volume files download /keys/mainnet/market-pha.json ~/kit-keys/market-pha.json
 ```
 
-Or, while a container runs, one file at a time:
+```sh
+railway volume files download /keys/mainnet/market-base.json ~/kit-keys/market-base.json
+```
+
+Or, while a container runs, through `railway ssh`:
 
 ```sh
 (umask 077; railway ssh -- cat /data/keys/mainnet/market-pha.json > ~/kit-keys/market-pha.json)
@@ -595,6 +624,9 @@ commands are the ones you will need for the mainnet keys.
 | The deployment is Crashed | The container stopped with an error, was started again 10 times and stopped each time. Its last lines say why; put that right, then deploy again. |
 | The container has exited and nothing restarts it | It exited without an error: a setup, a dry run that found nothing to put right, a mainnet config that lists nothing, or a stop you asked for. That is how those end. |
 | `Failed to initialize SFTP session: Timeout` from `railway volume files` | No container of the service runs. Set `KIT_HOLD=1`, deploy, and copy the files then. |
+| `error: unrecognized subcommand 'files'` from `railway volume files` | The CLI is older than the volume commands (4.15 was). Update it the way it was installed: `brew upgrade railway`, or `npm i -g @railway/cli` ("A shell, and the files on the volume"). |
+| `SSH authentication failed. Ensure one of your keys is registered with Railway` | No SSH key of yours is registered: `railway ssh keys add --key ~/.ssh/id_ed25519.pub`. |
+| `No loadable SSH keys found` | The CLI could not unlock your key: a mistyped passphrase, or no terminal to ask for it. Load the key into the agent with `ssh-add ~/.ssh/id_ed25519` and try again. |
 
 `README.md`, "If something goes wrong", has the kit's own messages.
 
