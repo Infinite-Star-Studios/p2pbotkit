@@ -466,8 +466,8 @@ does what the guide says. Make them before the mainnet steps.
    a trade goes on. When its log says "Writing to /data/.probe once a
    second now", press Redeploy. Only that second deployment's log counts:
    a probe sees only another probe, never a bot, so the deploy that first
-   set `KIT_PROBE` compares nothing and says so ("No probe has written to
-   this volume before"). The second one has one of two rows:
+   set `KIT_PROBE` compares nothing and says so ("No probe's mark is on
+   this volume"). The second one has one of two rows:
    - "ONE CONTAINER AT A TIME: the probe before this one ... wrote its
      last mark 9 s before this container started, and none since." The
      old container was gone first, and the number is how long the volume
@@ -576,6 +576,7 @@ commands are the ones you will need for the mainnet keys.
 | `The last start was 4 s ago (start 2 in a row): waiting 5 s before this one.` | The container was started again within five minutes of its last start. Mostly the bot stopped on an error, whose reason is in the lines before; a deploy or a restart by hand does the same. The wait is step 4 of "What the image does". Before a deploy you make on purpose soon after the last one, delete `/data/.last-start` while the bot runs (`railway ssh -- rm /data/.last-start`): the next start then waits for nothing. |
 | `this volume has no market.mainnet.json and no market bot's key pair (...), and KIT_ALLOW_MAINNET=1 is set already` | The volume has no config and not both of the market bot's key files, and the yes is given: the entrypoint makes no key pair then. For a new bot, remove `KIT_ALLOW_MAINNET` and take the steps of "On mainnet" from the first. For a bot that has run before, its keys are not on this volume, or not where its config names them ("One service, one volume, one bot"). No key was made. |
 | `this volume has no market.mainnet.json, and ... holds a mainnet bot's saved state` | A bot's state is on the volume, in a folder the template does not name, and no config says so: a first start would write a config that looks elsewhere. Give the bot its config: `KIT_MARKET_CONFIG` with that folder as its `dataDir`, or its `market.mainnet.json` on the volume. Nothing was made. |
+| `only one of the market bot's two key files is on this volume` | A key pair is two files, `market-pha.json` and `market-base.json`, and `start.sh` makes neither beside one that is there. Add the other one, or move the one that is there away (it may hold funds). |
 | `the key files that KIT_MARKET_CONFIG names are not on the volume, and they are not the pair a first start makes` | The config in the variable names key files of your own, and they are not there. Put them where the config names them; for a new bot, keep the template's `keys`, which the first start makes. No key was made. |
 | `STORE_LOCKED: ... on <another host>` | A lock file of another container was left in place: off Railway `KIT_CLEAR_LOCKS=1` is not set, or it is `0`, or a Node process ran in the container when the entrypoint looked, or a bot does run on this volume in another container. With no bot running anywhere on the volume, delete the `.lock` file the message names (on the volume it is `data/<bot>/<network>/.lock`). On Railway the entrypoint removes such a file itself and says "Removed ..., the leftover lock of a bot that is gone"; it knows Railway by `RAILWAY_VOLUME_MOUNT_PATH`, so if a deploy's first rows do not say that, set `KIT_CLEAR_LOCKS=1`. |
 | `STORE_LOCKED: ... is in use by process ...` with no host | Another copy of that bot runs in the same container: a dry run typed in a shell while the bot runs, for one. Stop it first. |

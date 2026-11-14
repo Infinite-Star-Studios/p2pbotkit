@@ -200,9 +200,10 @@ if [ "${KIT_PROBE:-}" = 1 ]; then
   MARK=$STATE/.probe
   say "KIT_PROBE=1: no bot is started. This container looks whether another probe writes to the volume at $STATE, then writes there once a second itself, also after a SIGTERM, until the platform ends it. Deploy once more while it writes: the first rows of that deploy say whether the two containers ran at once. A probe sees only another probe, never a bot. Then remove KIT_PROBE."
   began=$(date +%s 2>/dev/null || :)
+  here=$(uname -n 2>/dev/null || :)
   seen=$(cat "$MARK" 2>/dev/null || :)
   if [ -z "$seen" ]; then
-    say "No probe has written to this volume before, so there is nothing to compare with yet."
+    say "No probe's mark is on this volume, so there is nothing to compare with yet."
   else
     # A probe that runs writes every second. Five seconds without a new mark: it is gone.
     looks=0
@@ -229,6 +230,9 @@ if [ "${KIT_PROBE:-}" = 1 ]; then
       wrote=${wrote%% *}
       if is_count "$began" && is_count "$wrote" && [ "$began" -ge "$wrote" ] && [ $((began - wrote)) -le 300 ]; then
         say "ONE CONTAINER AT A TIME: the probe before this one (${seen%% *}) wrote its last mark $((began - wrote)) s before this container started, and none since."
+        if [ -n "$here" ] && [ "${seen%% *}" = "$here" ]; then
+          say "That mark bears this container's own host name: if this container was only started again, and not replaced by a new one, nothing was compared."
+        fi
       else
         say "Nothing was compared: the last probe on this volume (${seen%% *}) stopped writing long before this container started, or at a time that cannot be read, so it is not the container this one replaced. Deploy once more while this one writes."
       fi
@@ -238,7 +242,6 @@ if [ "${KIT_PROBE:-}" = 1 ]; then
       say "TWO CONTAINERS AT ONCE: another container (${seen%% *}) went on writing to this volume for $last s after this one had started. On this platform a bot that is replaced can run beside its successor for that long: set KIT_CLEAR_LOCKS=0 (docs/RAILWAY.md)."
     fi
   fi
-  here=$(uname -n 2>/dev/null || :)
   # An id of this probe's own: two containers can have one host name.
   id=$(od -An -N4 -tx4 /dev/urandom 2>/dev/null | tr -d ' \n' || :)
   trap 'say "SIGTERM: this container goes on writing, as a bot that is finishing a trade would, until the platform ends it."' TERM
@@ -246,6 +249,7 @@ if [ "${KIT_PROBE:-}" = 1 ]; then
   beat=0
   mine=''
   told=0
+  writes=0
   while :; do
     beat=$((beat + 1))
     # A mark here that this probe did not write: another one is writing beside it (it started while
@@ -256,10 +260,15 @@ if [ "${KIT_PROBE:-}" = 1 ]; then
       told=1
     fi
     mine="${here:-this-container} $(date +%s 2>/dev/null || :) $beat ${id:-0}"
-    if printf '%s\n' "$mine" >"$MARK.new" 2>/dev/null; then
-      mv -f "$MARK.new" "$MARK" 2>/dev/null || :
+    if printf '%s\n' "$mine" >"$MARK.new" 2>/dev/null && mv -f "$MARK.new" "$MARK" 2>/dev/null; then
+      [ "$writes" = 1 ] || say "Writing to $MARK once a second now."
+      writes=1
+    else
+      # The mark on the volume is then not this probe's: it must not be taken for another one's.
+      mine=''
+      [ "$writes" = stuck ] || say "The mark $MARK cannot be written (is the volume full?): nothing can be compared while that lasts."
+      writes=stuck
     fi
-    [ "$beat" != 1 ] || say "Writing to $MARK once a second now."
     sleep 1 || :
   done
 fi
@@ -438,13 +447,10 @@ link_config() {
 # (src/store.ts): a folder that is only named mainnet, a copy of the keys for one, is none.
 has_store() { [ -f "$1/mainnet/meta.json" ]; }
 
-# The data folders on the volume that hold one, wherever they are (the keys' folder apart), one to
-# a row, as they really are (links followed).
+# The data folders on the volume that hold one, wherever they are, one to a row, as they really
+# are (links followed).
 mainnet_stores() {
   find "$STATE" \( -type d -o -type l \) -name mainnet 2>/dev/null | while IFS= read -r store; do
-    case "$store" in
-      "$STATE"/keys | "$STATE"/keys/*) continue ;;
-    esac
     folder=$(CDPATH='' cd -- "$store/.." 2>/dev/null && pwd -P) || continue
     if has_store "$folder"; then
       printf '%s\n' "$folder"
@@ -485,7 +491,7 @@ write_market_config() {
     if [ -n "$was" ] && [ "$was" != "$wants" ] && has_store "$was"; then
       why="its \"dataDir\" is $wants, and the config it replaces has $was, which holds a market bot's saved state: offers and trades that are still open there would not be looked at, and not finished. Keep the \"dataDir\" as it is. To move the bot to another data folder on purpose, put the config on the volume as a file and remove KIT_MARKET_CONFIG."
     elif [ -n "$other" ]; then
-      why="its \"dataDir\" is $wants, which holds no saved state, while $other on this volume holds a mainnet bot's: offers and trades that are still open there would not be looked at, and not finished. Name that folder as the \"dataDir\". To start in a new data folder on purpose, put the config on the volume as a file and remove KIT_MARKET_CONFIG."
+      why="its \"dataDir\" is $wants, which holds no saved state, while $other on this volume holds a mainnet bot's: offers and trades that are still open there would not be looked at, and not finished. Name that folder as the \"dataDir\". To start in a new data folder on purpose, put the config on the volume as a file, with the bot's key files where it names them, and remove KIT_MARKET_CONFIG."
     elif [ "${2:-}" = check ]; then
       rm -f "$new"
       return 0
@@ -550,7 +556,11 @@ mainnet_config() {
   elif [ ! -f "$CONFIG" ]; then
     die "$CONFIG is there but is not a file: move it away, then start again"
   fi
-  refused="The config on the volume was left as it was, and no bot was started."
+  if [ -n "$first" ]; then
+    refused="The volume was left as it was, and no bot was started."
+  else
+    refused="The config on the volume was left as it was, and no bot was started."
+  fi
   if [ -n "${KIT_MARKET_CONFIG:-}" ]; then
     # Before anything is made: a variable that cannot be the config stops the start here, with
     # the volume as it was.
@@ -592,14 +602,21 @@ mainnet_config() {
       # exist yet. The volume was replaced or wiped, or the service was copied, variables and
       # all; the bot's own keys, with their funds and its open trades, are not here.
       if [ "${KIT_ALLOW_MAINNET:-}" = 1 ] && { [ ! -f "$STATE/keys/mainnet/market-pha.json" ] || [ ! -f "$STATE/keys/mainnet/market-base.json" ]; }; then
+        if [ -f "$STATE/keys/mainnet/market-pha.json" ] || [ -f "$STATE/keys/mainnet/market-base.json" ]; then
+          die "only one of the market bot's two key files is on this volume ($STATE/keys/mainnet/market-pha.json and market-base.json): add the other one, or move the one that is there away (it may hold funds). No key was made, and no bot was started"
+        fi
         die "this volume has no market.mainnet.json and no market bot's key pair ($STATE/keys/mainnet/market-pha.json and market-base.json), and KIT_ALLOW_MAINNET=1 is set already: this start would make a new key pair, and none is made while the yes is given. If this bot has run before, its keys are not here: attach the volume that holds them, or put its key files here (docs/RAILWAY.md, \"One service, one volume, one bot\"). For a new bot, remove KIT_ALLOW_MAINNET until the first start has made the key pair and you have seen a dry run. No key was made"
       fi
       rm -f "$KIT_DIR/market.mainnet.json"
       sh "$KIT_DIR/start.sh" mainnet setup </dev/null
       [ -f "$KIT_DIR/market.mainnet.json" ] || die "start.sh mainnet setup made no market.mainnet.json"
-      # Onto the volume whole or not at all: a copy beside it, then a rename.
-      cp "$KIT_DIR/market.mainnet.json" "$CONFIG.new.$$"
-      mv -f "$CONFIG.new.$$" "$CONFIG"
+      if [ -z "${KIT_MARKET_CONFIG:-}" ]; then
+        # Onto the volume whole or not at all: a copy beside it, then a rename. With the variable
+        # set, the variable is the first config the volume gets, below, and the setup's is not put
+        # there at all: a start cut short in between leaves no config that names another folder.
+        cp "$KIT_DIR/market.mainnet.json" "$CONFIG.new.$$"
+        mv -f "$CONFIG.new.$$" "$CONFIG"
+      fi
       rm -f "$KIT_DIR/market.mainnet.json"
       say ""
       say "In this container the market bot's config is $CONFIG, on the volume. Set it with the KIT_MARKET_CONFIG variable, or put your own file there (docs/RAILWAY.md)."
@@ -607,6 +624,8 @@ mainnet_config() {
   fi
   if [ -n "${KIT_MARKET_CONFIG:-}" ]; then
     if ! why=$(write_market_config "$first"); then
+      # (After a first start's setup, the volume is no longer as it was: the key pair is on it.)
+      [ -z "$first" ] || refused="No bot was started."
       die "KIT_MARKET_CONFIG cannot be the market bot's config: $why $refused"
     fi
     say "Wrote the market bot's config, $CONFIG, from KIT_MARKET_CONFIG."

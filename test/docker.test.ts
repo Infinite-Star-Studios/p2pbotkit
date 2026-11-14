@@ -112,6 +112,20 @@ if [ -n "\${FAKE_CLOCK:-}" ]; then echo $(( $(cat "$FAKE_CLOCK") + $1 )) >"$FAKE
 if [ "\${FAKE_SLEEP_REAL:-}" = 1 ]; then exec ${REAL_SLEEP} "$@"; fi
 `;
 
+/**
+ * mv's stand-in, first on the PATH: with FAKE_MV_FAIL_AT=<n> the n-th mv of a run fails (it counts in the file
+ * FAKE_MV_COUNT names), as when a start is cut short or a volume is full. Otherwise it is the real mv.
+ */
+const REAL_MV = realPath('mv');
+const FAKE_MV = `#!/bin/sh
+if [ -n "\${FAKE_MV_FAIL_AT:-}" ]; then
+  n=$(( $(cat "$FAKE_MV_COUNT" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" >"$FAKE_MV_COUNT"
+  [ "$n" != "$FAKE_MV_FAIL_AT" ] || exit 1
+fi
+exec ${REAL_MV} "$@"
+`;
+
 /** date's stand-in, first on the PATH: "date +%s" reads the clock a test set (the file FAKE_CLOCK names). */
 const FAKE_DATE = `#!/bin/sh
 if [ -n "\${FAKE_CLOCK:-}" ] && [ "$#" = 1 ] && [ "$1" = +%s ]; then cat "$FAKE_CLOCK"; exit 0; fi
@@ -179,6 +193,7 @@ async function box(): Promise<Box> {
   await writeFile(join(root, 'bin', 'stat'), FAKE_STAT, { mode: 0o755 });
   await writeFile(join(root, 'bin', 'sleep'), FAKE_SLEEP, { mode: 0o755 });
   await writeFile(join(root, 'bin', 'date'), FAKE_DATE, { mode: 0o755 });
+  await writeFile(join(root, 'bin', 'mv'), FAKE_MV, { mode: 0o755 });
   return b;
 }
 
@@ -191,7 +206,7 @@ const NOWHERE = '/nowhere';
  * that runs the tests is on the PATH, for start.sh's stand-in and the entrypoint's own checks.
  */
 function envOf(b: Box, extra: Record<string, string> = {}): Record<string, string> {
-  const env: Record<string, string> = { PATH: `${join(b.kit, '..', 'bin')}:${dirname(process.execPath)}:${process.env.PATH ?? ''}`, FAKE_RECORD: b.record, FAKE_VOLUME: b.state, FAKE_SLEEPS: b.sleeps, KIT_STATE_DIR: b.state, KIT_PROC_DIR: b.proc };
+  const env: Record<string, string> = { PATH: `${join(b.kit, '..', 'bin')}:${dirname(process.execPath)}:${process.env.PATH ?? ''}`, FAKE_RECORD: b.record, FAKE_VOLUME: b.state, FAKE_SLEEPS: b.sleeps, FAKE_MV_COUNT: join(b.kit, '..', 'moves'), KIT_STATE_DIR: b.state, KIT_PROC_DIR: b.proc };
   for (const [k, v] of Object.entries(extra)) {
     if (v === '') delete env[k];
     else env[k] = v;
@@ -702,7 +717,10 @@ describe('docker/entrypoint.sh: mainnet, the market bot\'s config on the volume'
       await put(v);
       const r = run(v, [], { KIT_NETWORK: 'mainnet', KIT_ALLOW_MAINNET: '1' });
       assert.equal(r.code, 1, what);
-      assert.match(r.err, /no market bot's key pair/, what);
+      // With one of the two files there, removing the yes would not help (the setup makes none beside it):
+      // the row says what would.
+      if (what === 'half the pair') assert.match(r.err, /only one of the market bot's two key files is on this volume \(.*\): add the other one, or move the one that is there away \(it may hold funds\)\. No key was made, and no bot was started$/m);
+      else assert.match(r.err, /no market bot's key pair/, what);
       assert.deepEqual(await calls(v), [], what);
       assert.ok(!existsSync(join(v.state, 'market.mainnet.json')) && !existsSync(join(v.state, 'elsewhere', 'market-pha.json')), what);
     }
@@ -820,9 +838,37 @@ describe('docker/entrypoint.sh: mainnet, the market bot\'s config on the volume'
       const r = run(s, [], { KIT_NETWORK: 'mainnet', KIT_MARKET_CONFIG: template });
       assert.equal(r.code, 1);
       assert.ok(r.err.includes(`which holds no saved state, while ${join(s.state, 'data', 'prod')} on this volume holds a mainnet bot's`), r.err);
+      // There is no config on this volume to leave as it was, and the advice names what a config as a file needs.
+      assert.match(r.err, /put the config on the volume as a file, with the bot's key files where it names them, and remove KIT_MARKET_CONFIG\. The volume was left as it was, and no bot was started\.$/m);
     }
     assert.deepEqual(await calls(s), []);
     assert.ok(!existsSync(join(s.state, 'keys', 'mainnet')) && !existsSync(join(s.state, 'market.mainnet.json')));
+  });
+
+  test('with the variable set, the template of a first start\'s setup never reaches the volume: a start cut short before the variable is written leaves no config that names another folder', async () => {
+    const template = await readKitFile('examples/market.mainnet.example.json');
+    const mine = await marketConfig((c) => { c.dataDir = './data/mine'; });
+    // The second mv of the start fails. With the template put on the volume first, that would be the variable's.
+    const b = await box();
+    const r = run(b, [], { KIT_NETWORK: 'mainnet', KIT_MARKET_CONFIG: mine, FAKE_MV_FAIL_AT: '2' });
+    const config = join(b.state, 'market.mainnet.json');
+    assert.equal(r.code, 0, r.err);
+    assert.equal(await readFile(config, 'utf8'), `${mine}\n`, 'the volume\'s first config is the variable');
+    // (That second mv was the one of the start's own mark, which never stops a start.)
+    assert.deepEqual((await calls(b)).map((x) => x.args), [['mainnet', 'setup'], ['mainnet']]);
+    // The first one fails: no config at all, and the next start begins anew.
+    const c = await box();
+    const cut = run(c, [], { KIT_NETWORK: 'mainnet', KIT_MARKET_CONFIG: mine, FAKE_MV_FAIL_AT: '1' });
+    assert.equal(cut.code, 1);
+    assert.match(cut.err, /KIT_MARKET_CONFIG cannot be the market bot's config: it could not be put in the place of .*market\.mainnet\.json\. No bot was started\.$/m);
+    assert.ok(!existsSync(join(c.state, 'market.mainnet.json')), 'not the template either');
+    assert.deepEqual(await halfWritten(c), []);
+    assert.equal(run(c, [], { KIT_NETWORK: 'mainnet', KIT_MARKET_CONFIG: mine }).code, 0);
+    assert.equal(await readFile(join(c.state, 'market.mainnet.json'), 'utf8'), `${mine}\n`);
+    // Without the variable the setup's config is the volume's, as before.
+    const n = await box();
+    assert.equal(run(n, [], { KIT_NETWORK: 'mainnet' }).code, 0);
+    assert.equal(await readFile(join(n.state, 'market.mainnet.json'), 'utf8'), template);
   });
 
   test('something in the config\'s place that is not a file is refused', async () => {
@@ -1402,7 +1448,7 @@ describe('docker/entrypoint.sh: KIT_PROBE=1', { skip }, () => {
     const p = probe(t, b);
     await p.until(/Writing to .*\/\.probe once a second now\./);
     assert.match(p.text(), /KIT_PROBE=1: no bot is started\./);
-    assert.match(p.text(), /No probe has written to this volume before, so there is nothing to compare with yet\./);
+    assert.match(p.text(), /No probe's mark is on this volume, so there is nothing to compare with yet\./);
     const first = await markOf(b);
     assert.match(first, /^\S+ [1-9][0-9]* [1-9][0-9]* [0-9a-f]+\n$/, 'a host, a time, a count and an id of its own');
     assert.match(p.text(), /A probe sees only another probe, never a bot\./);
@@ -1455,6 +1501,28 @@ describe('docker/entrypoint.sh: KIT_PROBE=1', { skip }, () => {
     await writeFile(join(f.state, '.probe'), `the-one-before ${now - 200} 7 0a1b2c3d\n`);
     const q = probe(t, f, { FAKE_SLEEP_REAL: '' });
     await q.until(/ONE CONTAINER AT A TIME: the probe before this one \(the-one-before\) wrote its last mark 2[0-9][0-9] s before this container started, and none since\./);
+    await q.kill();
+  });
+
+  test('a mark the probe cannot write is not taken for another container\'s, and a mark with this container\'s own host name is named as such', { timeout: 60_000 }, async (t) => {
+    const now = Math.floor(Date.now() / 1000);
+    // An older mark on the volume, and no way to write a new one (a full volume): the mark that stays is not
+    // this probe's, and it is not another container writing either.
+    const b = await box();
+    await writeFile(join(b.state, '.probe'), `an-old-probe ${now - 4000} 9 0a1b2c3d\n`);
+    await mkdir(join(b.state, '.probe.new'));
+    const p = probe(t, b, { FAKE_SLEEP_REAL: '' });
+    await p.until(/The mark .*\/\.probe cannot be written \(is the volume full\?\): nothing can be compared while that lasts\./);
+    const beats = (await sleepsOf(b)).length;
+    while ((await sleepsOf(b)).length < beats + 20) await new Promise((r) => setTimeout(r, 10));
+    assert.doesNotMatch(p.text(), /TWO CONTAINERS|Writing to/);
+    await p.kill();
+    // The same container started again (a restart, not a new deployment) finds its own mark.
+    const o = await box();
+    await writeFile(join(o.state, '.probe'), `${hostname()} ${now - 3} 9 0a1b2c3d\n`);
+    const q = probe(t, o, { FAKE_SLEEP_REAL: '' });
+    await q.until(/ONE CONTAINER AT A TIME: the probe before this one \(\S+\) wrote its last mark [0-9]+ s before this container started, and none since\./);
+    await q.until(/That mark bears this container's own host name: if this container was only started again, and not replaced by a new one, nothing was compared\./);
     await q.kill();
   });
 
