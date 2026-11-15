@@ -558,7 +558,11 @@ commands are the ones you will need for the mainnet keys.
   count toward your accept rate.
 - **Your own Base RPC.** The kit's pinned Base RPCs are public ones, which
   limit each address, and yours is shared here: a limited RPC fails a start
-  and slows every step of a trade. A `baseRpc` of your own in the config
+  and slows every step of a trade. On mainnet it can also hold back a sale:
+  on one bot, `https://mainnet.base.org` answered the reads before the
+  seller's first claim with "request limit reached" until the claim was
+  nearly too late, and the bot shares its secret only while an hour or more
+  is left before the buyer's refund time. A `baseRpc` of your own in the config
   (https, serving the pinned chain) takes the bot off that limit. Choose a
   provider you would trust with the bot's balance: the kit believes what
   its RPC says about the chain. Most providers put your key in the
@@ -623,6 +627,7 @@ commands are the ones you will need for the mainnet keys.
 | `KEY_FILE ... cannot be opened (ENOENT)` | The config names key files that are not on the volume. The market bot's are `./keys/mainnet/market-pha.json` and `./keys/mainnet/market-base.json`: the first start on a volume makes them, while the volume has no `market.mainnet.json` yet. On a volume that got its config another way, make them in a `KIT_HOLD=1` shell (`node --import tsx examples/new-keys.ts --dir keys/mainnet --name market`), or upload your own pair to `/keys/mainnet/`. |
 | The deployment is Crashed | The container stopped with an error, was started again 10 times and stopped each time. Its last lines say why; put that right, then deploy again. |
 | The container has exited and nothing restarts it | It exited without an error: a setup, a dry run that found nothing to put right, a mainnet config that lists nothing, or a stop you asked for. That is how those end. |
+| `claimBase refused (FIRST_CLAIM): ... Could not read when the buyer's USDC lock was mined on Base`, again and again | The Base RPC refuses the bot's reads, most often the public one's request limit. Set a `baseRpc` of your own ("Know before you rely on it") and deploy at once: the bot shares the secret only while an hour or more is left before the buyer's refund time, and after that the trade ends in refunds on both sides. |
 | `Failed to initialize SFTP session: Timeout` from `railway volume files` | No container of the service runs. Set `KIT_HOLD=1`, deploy, and copy the files then. |
 | `error: unrecognized subcommand 'files'` from `railway volume files` | The CLI is older than the volume commands (4.15 was). Update it the way it was installed: `brew upgrade railway`, or `npm i -g @railway/cli` ("A shell, and the files on the volume"). |
 | `SSH authentication failed. Ensure one of your keys is registered with Railway` | No SSH key of yours is registered: `railway ssh keys add --key ~/.ssh/id_ed25519.pub`. |
