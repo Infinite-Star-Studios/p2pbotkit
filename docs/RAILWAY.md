@@ -260,6 +260,32 @@ no longer lists, and lists the new ones. With `KIT_ALLOW_MAINNET=1` in
 place, a deploy without the dry run trades at once at the prices it finds,
 a typing error included.
 
+**To change your offers without a restart**, keep the config as a file on
+the volume, not in `KIT_MARKET_CONFIG`: the running bot reads
+`/data/market.mainnet.json` again once a minute and takes up new offers,
+bids, recurring orders and prices (`examples/README.md`, "Stopping,
+restarting"). A new price changes the listed offer in place, so it keeps
+what is left of it. While `KIT_MARKET_CONFIG` is set, each start writes the
+variable over that file, so remove the variable once (that deploy is the
+last restart; the start then uses the file as it is). After that, copy the
+file down, change it, and put it back, with no deploy:
+
+```sh
+railway volume files download /market.mainnet.json market.mainnet.json
+```
+
+```sh
+railway volume files upload market.mainnet.json /market.mainnet.json
+```
+
+Within a minute the log says "The config ... was changed: the bot now keeps
+listed ...", then "Offer #... repriced" or the listings it replaced. A file
+that does not pass the config's checks, or that also changes a setting only
+a start takes up (`keys`, `dataDir`, `network`, `api`, `baseRpc` and the
+like), is not applied at all, and the log says why. Keep the copy on your
+machine as private as the volume: with a `baseRpc` of your own, it holds
+that provider's key.
+
 **To take your yes back**, stop the bot first ("To stop a bot for good"
 below). Removing `KIT_ALLOW_MAINNET` alone only makes the next start refuse
 to run: no bot starts, also not the one that would cancel the offers and

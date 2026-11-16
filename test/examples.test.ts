@@ -1096,6 +1096,29 @@ class FakeKit {
     o.closedAt = this.clock();
   }
 
+  /** When set, the next reprice is refused with this error (as a board's refusal would be). */
+  repriceRefusal: Error | null = null;
+
+  /** As the kit's store keeps it: a fixed price joins the price history and following turns off; follow settings replace the old ones. */
+  async repriceOffer(id: number, change: { price: string } | { follow: { offsetBps: number; limitPrice: string; dailyMax?: string } }): Promise<void> {
+    this.#call('repriceOffer', { id, change });
+    const o = this.offers.find((x) => x.id === id && x.closedAt == null);
+    assert.ok(o, `reprice of an offer the kit does not keep open (#${id})`);
+    if (this.repriceRefusal) {
+      const e = this.repriceRefusal;
+      this.repriceRefusal = null;
+      throw e;
+    }
+    if ('price' in change) {
+      o.price = usdcToRaw(change.price).toString();
+      o.priceHistory = [...o.priceHistory, { price: o.price, at: this.clock() }];
+      o.follow = null;
+    } else {
+      const daily = change.follow.dailyMax;
+      o.follow = { offsetBps: change.follow.offsetBps, limitPrice: usdcToRaw(change.follow.limitPrice).toString(), dailyMax: daily !== undefined ? tokenToRaw(o.symbol, daily).toString() : o.tazTotal };
+    }
+  }
+
   async buyUpTo(o: unknown): Promise<LocalTrade[]> {
     this.#call('buyUpTo', o);
     return [];
@@ -1542,6 +1565,121 @@ describe('the runner (seller-bot.ts) on a fake kit', () => {
     await until(vt, () => poor.count('postOffer') === 2, 'the bids listed', { stepMs: 5_000 });
     b.signals.emit('SIGINT');
     assert.equal(await drive(vt, b.p), 0);
+  });
+
+  test('a changed config is taken up within a minute, with no restart: a new price changes the listed offer in place, new amounts replace the listing, a dropped offer is cancelled', async () => {
+    const vt = new VTime();
+    const dir = await tempDir();
+    const config = join(dir, 'live.json');
+    const base = { network: 'devnet', keys: { pha: './keys/s-pha.json', base: './keys/s-base.json' }, dataDir: './data/s', acceptAfterS: 0 };
+    const taz = { symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08' };
+    const ra = { symbol: 'RA', total: '6', min: '1', max: '2', price: '1.95' };
+    await writeFile(config, JSON.stringify({ ...base, offers: [taz, ra] }));
+    const kit = new FakeKit(vt.now);
+    const r = await onFakeKit('seller', kit, vt, ['--config', config]);
+    await until(vt, () => kit.count('run') >= 1, 'run()', { stepMs: 1_000 });
+    assert.equal(kit.count('postOffer'), 2);
+    const tazOffer = kit.offers[0]!, raOffer = kit.offers[1]!;
+    kit.calls = [];
+
+    // TAZ at a new price, RA with new amounts, a C offer and a recurring order added.
+    await writeFile(config, JSON.stringify({
+      ...base,
+      offers: [{ ...taz, price: '1.12' }, { ...ra, total: '8' }, { symbol: 'C', total: '10', min: '1', max: '5', price: '1.03' }],
+      take: { symbol: 'TAZ', minPrice: '1.05', amount: '2', everyS: 120 }
+    }));
+    await until(vt, () => kit.count('cancelOffer') >= 1 && kit.count('sellDownTo') >= 1, 'the change taken up', { stepMs: 5_000 });
+    assert.deepEqual(kit.calls.filter((c) => c.fn === 'repriceOffer').map((c) => c.arg), [{ id: tazOffer.id, change: { price: '1.12' } }]);
+    const tazNow = kit.offers.find((o) => o.id === tazOffer.id)!;
+    assert.equal(tazNow.closedAt, null, 'the TAZ listing is kept, with what is left of it');
+    assert.equal(tazNow.price, '1120000');
+    assert.deepEqual(kit.calls.filter((c) => c.fn === 'postOffer').map((c) => (c.arg as OfferInput).symbol), ['RA', 'C']);
+    assert.deepEqual(kit.calls.filter((c) => c.fn === 'cancelOffer').map((c) => c.arg), [raOffer.id]);
+    assert.equal(kit.count('run'), 0, 'no restart');
+    const out = r.out.lines.join('\n');
+    assert.match(out, /The config .*live\.json was changed: the bot now keeps listed sell 30 TAZ \(1 to 5 per trade\) at 1\.12 mUSDC; sell 8 RA \(1 to 2 per trade\) at 1\.95 mUSDC; sell 10 C \(1 to 5 per trade\) at 1\.03 mUSDC, with 1 recurring order\(s\)\./);
+    assert.match(out, new RegExp(`Offer #${tazOffer.id} repriced: sell 30 TAZ \\(1 to 5 per trade\\) at 1\\.12 mUSDC\\.`));
+    assert.match(out, new RegExp(`Offer #${raOffer.id} cancelled: the config no longer lists it\\.`));
+
+    // The next syncs find everything as the config says: nothing more is sent.
+    const sent = kit.calls.filter((c) => ['postOffer', 'cancelOffer', 'repriceOffer'].includes(c.fn)).length;
+    await vt.advance(150_000);
+    assert.equal(kit.calls.filter((c) => ['postOffer', 'cancelOffer', 'repriceOffer'].includes(c.fn)).length, sent);
+
+    // A config with no offers left cancels every listing, still with no restart.
+    await writeFile(config, JSON.stringify({ ...base, offers: [] }));
+    await until(vt, () => kit.offers.every((o) => o.closedAt != null), 'every offer cancelled', { stepMs: 5_000 });
+    assert.match(r.out.lines.join('\n'), /was changed: the bot now keeps listed no offers or bids\./);
+    r.signals.emit('SIGINT');
+    assert.equal(await drive(vt, r.p), 0);
+  });
+
+  test('a changed config that cannot be used, or that also changes a setting only a restart takes up, changes nothing and says why once; once put right, it is taken up', async () => {
+    const vt = new VTime();
+    const dir = await tempDir();
+    const config = join(dir, 'live.json');
+    const base = { network: 'devnet', keys: { pha: './keys/s-pha.json', base: './keys/s-base.json' }, dataDir: './data/s', acceptAfterS: 0 };
+    const taz = { symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08' };
+    await writeFile(config, JSON.stringify({ ...base, offers: [taz] }));
+    const kit = new FakeKit(vt.now);
+    const r = await onFakeKit('seller', kit, vt, ['--config', config]);
+    await until(vt, () => kit.count('run') >= 1, 'run()', { stepMs: 1_000 });
+    kit.calls = [];
+    const sends = () => kit.calls.filter((c) => ['postOffer', 'cancelOffer', 'repriceOffer'].includes(c.fn)).length;
+    const said = (re: RegExp) => r.out.lines.filter((l) => re.test(l)).length;
+
+    // A file caught half written.
+    await writeFile(config, '{"network": "devnet", "offers": [');
+    await until(vt, () => said(/live\.json was changed, but it cannot be used: .* The bot goes on with the one it has\./) === 1, 'the refusal', { stepMs: 5_000 });
+    // An offer the kit's table refuses.
+    await writeFile(config, JSON.stringify({ ...base, offers: [{ ...taz, price: '1.0800001' }] }));
+    await until(vt, () => said(/live\.json was changed, but it cannot be used: offers\[0\]: .*more than 6 decimal places/) === 1, 'the second refusal', { stepMs: 5_000 });
+    // Another data folder and another RPC: those need a restart, so nothing of the file is applied.
+    await writeFile(config, JSON.stringify({ ...base, dataDir: './data/other', baseRpc: 'https://base.example', offers: [{ ...taz, price: '2.00' }] }));
+    await until(vt, () => said(/also changes dataDir, baseRpc, which the bot takes up only at a restart\. Nothing of it was applied/) === 1, 'the restart refusal', { stepMs: 5_000 });
+    await vt.advance(180_000);
+    assert.equal(said(/also changes dataDir, baseRpc/), 1, 'said once, not at every sync');
+    assert.equal(sends(), 0, 'the listed offer is left as it was');
+
+    // Put right: the price change is taken up.
+    await writeFile(config, JSON.stringify({ ...base, offers: [{ ...taz, price: '2.00' }] }));
+    await until(vt, () => kit.count('repriceOffer') === 1, 'the reprice', { stepMs: 5_000 });
+    assert.equal(kit.offers[0]!.price, '2000000');
+    assert.equal(kit.count('postOffer') + kit.count('cancelOffer'), 0);
+    r.signals.emit('SIGINT');
+    assert.equal(await drive(vt, r.p), 0);
+  });
+
+  test('a reprice the board refuses is replaced by a new listing at the new price; a change to the follow settings is a reprice too', async () => {
+    const vt = new VTime();
+    const dir = await tempDir();
+    const config = join(dir, 'live.json');
+    const base = { network: 'devnet', keys: { pha: './keys/s-pha.json', base: './keys/s-base.json' }, dataDir: './data/s', acceptAfterS: 0 };
+    const ra = { symbol: 'RA', total: '6', min: '1', max: '2', follow: { offsetBps: 200, limitPrice: '1.90' } };
+    await writeFile(config, JSON.stringify({ ...base, offers: [ra] }));
+    const kit = new FakeKit(vt.now);
+    const r = await onFakeKit('seller', kit, vt, ['--config', config]);
+    await until(vt, () => kit.count('run') >= 1, 'run()', { stepMs: 1_000 });
+    const first = kit.offers[0]!;
+    kit.calls = [];
+
+    // New follow settings: repriced in place.
+    await writeFile(config, JSON.stringify({ ...base, offers: [{ ...ra, follow: { offsetBps: 300, limitPrice: '1.95' } }] }));
+    await until(vt, () => kit.count('repriceOffer') === 1, 'the follow change', { stepMs: 5_000 });
+    assert.deepEqual(kit.calls.find((c) => c.fn === 'repriceOffer')!.arg, { id: first.id, change: { follow: { offsetBps: 300, limitPrice: '1.95' } } });
+    assert.deepEqual(kit.offers[0]!.follow, { offsetBps: 300, limitPrice: '1950000', dailyMax: first.tazTotal });
+
+    // A fixed price the board refuses to set: the old listing is replaced by a new one at that price.
+    kit.repriceRefusal = new Error('the board refused the reprice');
+    await writeFile(config, JSON.stringify({ ...base, offers: [{ symbol: 'RA', total: '6', min: '1', max: '2', price: '2.10' }] }));
+    await until(vt, () => kit.count('postOffer') === 1 && kit.count('cancelOffer') === 1, 'the replacement', { stepMs: 5_000 });
+    assert.match(r.out.lines.join('\n'), new RegExp(`Offer #${first.id} could not be repriced \\(the board refused the reprice\\); a new listing takes its place\\.`));
+    assert.equal(kit.offers.find((o) => o.id === first.id)!.closedAt != null, true);
+    const open = kit.offers.filter((o) => o.closedAt == null);
+    assert.equal(open.length, 1);
+    assert.equal(open[0]!.price, '2100000');
+    r.signals.emit('SIGINT');
+    assert.equal(await drive(vt, r.p), 0);
   });
 
   test('an instant offer in the config is posted with mode "instant", and after a restart its kept offer is kept, never listed twice', async () => {

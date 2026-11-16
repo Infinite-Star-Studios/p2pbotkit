@@ -204,6 +204,20 @@ and name any check a real start would stop on.
 - Its state is in `dataDir` either way. Start it again and it resumes every
   trade where it was, from the board and the chains; it never sends anything
   blindly twice.
+- **No restart for new prices.** A running bot reads its config file again
+  once a minute, and takes up a change to `offers`, `bids` and `take`:
+  - a new price (or new follow settings) for an offer it has listed changes
+    that offer in place, so it keeps its listing and what is left of it;
+  - new amounts, another token or another mode replace the listing: the old
+    one is cancelled and the new one listed;
+  - an offer the config no longer lists is cancelled, and a new one listed.
+
+  The other settings (`network`, `api`, `apiKeyFile`, `keys`, `dataDir`,
+  `phaRpc`, `baseRpc`, `acceptOnTheirOwn`, `acceptAfterS`, `claimWatchS`,
+  `claimMode`, `usePermit`) take effect only at a start: a changed file that
+  also changes one of them is not applied at all, and the log says which.
+  Neither is a file that cannot be read or does not pass the config's
+  checks; the bot goes on with the config it has, and says why once.
 
 ## Upgrading the kit
 

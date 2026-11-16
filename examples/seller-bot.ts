@@ -381,7 +381,7 @@ export function readOnlyTransports(network: Network, given: KitInternals | undef
 // ── The runner ───────────────────────────────────────────────────────────────
 
 /** What the runner uses of a Kit (createKit's Kit has all of it; tests pass a fake). */
-export type BotKit = Pick<Kit, 'network' | 'address' | 'preflight' | 'postOffer' | 'cancelOffer' | 'buyUpTo' | 'sellDownTo' | 'run' | 'close'> & {
+export type BotKit = Pick<Kit, 'network' | 'address' | 'preflight' | 'postOffer' | 'cancelOffer' | 'repriceOffer' | 'buyUpTo' | 'sellDownTo' | 'run' | 'close'> & {
   readonly board: Pick<Kit['board'], 'offers' | 'recent' | 'reference'>;
   readonly store: Pick<Kit['store'], 'listOffers' | 'listTrades'>;
   readonly pha: Pick<Kit['pha'], 'balances'>;
@@ -470,6 +470,27 @@ export function sameOffer(k: LocalOffer, w: OfferInput, acceptOnTheirOwn: boolea
 }
 
 /**
+ * The price change that turns a kept open offer into this config entry when
+ * they differ in their price or follow settings only (same side, token,
+ * amounts, mode and accept setting), or null. Such an offer is repriced in
+ * place: it keeps its listing and what is left of it.
+ */
+export function repriceOf(k: LocalOffer, w: OfferInput, acceptOnTheirOwn: boolean): { price: string } | { follow: { offsetBps: number; limitPrice: string; dailyMax?: string } } | null {
+  if (k.side !== w.side || k.symbol !== w.symbol || k.acceptOnTheirOwn !== acceptOnTheirOwn || k.mode !== (w.mode ?? 'standard')) return null;
+  const raw = (v: string) => tokenToRaw(w.symbol, v).toString();
+  if (k.tazTotal !== raw(w.total) || k.tazMin !== raw(w.min) || k.tazMax !== raw(w.max)) return null;
+  if (sameOffer(k, w, acceptOnTheirOwn)) return null;
+  if (w.follow) return { follow: { offsetBps: w.follow.offsetBps, limitPrice: w.follow.limitPrice, ...(w.follow.dailyMax !== undefined ? { dailyMax: w.follow.dailyMax } : {}) } };
+  return { price: w.price! };
+}
+
+/** The settings a running bot cannot take up from a changed config (they need a restart): the names of those that differ. */
+const RESTART_ONLY = ['network', 'api', 'apiKeyFile', 'keys', 'dataDir', 'phaRpc', 'baseRpc', 'acceptOnTheirOwn', 'acceptAfterS', 'claimWatchS', 'claimMode', 'usePermit'] as const;
+export function restartOnlyChanges(running: BotConfig, changed: BotConfig): string[] {
+  return RESTART_ONLY.filter((k) => JSON.stringify(running[k]) !== JSON.stringify(changed[k]));
+}
+
+/**
  * Why the bot cannot fill even the smallest trade of an offer now, or null
  * (a read that fails holds nothing back: every accept checks the funds again).
  */
@@ -540,8 +561,10 @@ export async function runBot(o: RunBotOptions): Promise<number> {
   }
   const configPath = flags.config ? resolve(cwd, flags.config) : role === 'market' ? resolve(cwd, MARKET_CONFIG) : defaultConfigPath(role);
   let cfg: BotConfig;
+  let configText: string;
   try {
-    cfg = parseBotConfig(JSON.parse(await readFile(configPath, 'utf8')));
+    configText = await readFile(configPath, 'utf8');
+    cfg = parseBotConfig(JSON.parse(configText));
   } catch (e) {
     const noMarketConfig = role === 'market' && !flags.config && (e as { code?: unknown } | null)?.code === 'ENOENT';
     const hint = noMarketConfig ? `. Make it with: sh start.sh mainnet setup (or copy examples/market.mainnet.example.json to ${MARKET_CONFIG}), then add your offers.` : '';
@@ -580,7 +603,7 @@ export async function runBot(o: RunBotOptions): Promise<number> {
       say(`Not starting: ${blocking.join(', ')} (above) stops the start. Nothing was sent.`);
       return 1;
     }
-    return await trade(kit, cfg, { say, usdc, now, sleep, signals: o.signals ?? process });
+    return await trade(kit, cfg, { say, usdc, now, sleep, signals: o.signals ?? process, configPath, configText });
   } finally {
     await kit.close().catch((e) => say(`The data directory could not be released cleanly (${explain(e)}).`));
   }
@@ -716,8 +739,9 @@ export function referenceLines(ref: Reference, cfg: Pick<BotConfig, 'offers' | '
 }
 
 /** The trading part of a run, until a Ctrl-C (see the file comment). */
-async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void; usdc: string; now: () => number; sleep: SleepFn; signals: SignalSource }): Promise<number> {
+async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void; usdc: string; now: () => number; sleep: SleepFn; signals: SignalSource; configPath: string; configText: string }): Promise<number> {
   const { say, usdc, now, sleep, signals } = x;
+  let configText = x.configText;
   const notes = new Map<string, string>();
   const note = (key: string, line: string) => {
     if (notes.get(key) === line) return;
@@ -756,6 +780,7 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
   const syncOffers = async (): Promise<void> => {
     const kept = (await kit.store.listOffers()).filter((k) => k.closedAt == null);
     const used = new Set<number>();
+    const wanted = (k: LocalOffer) => cfg.offers.some((w) => sameOffer(k, w, cfg.acceptOnTheirOwn));
     for (const w of cfg.offers) {
       if (stopping || runCtl.signal.aborted) return;
       const key = `post:${describeOffer(w)}`;
@@ -763,6 +788,20 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
       if (same) {
         used.add(same.id);
         continue;
+      }
+      // An open offer that differs from this entry in its price (or its follow settings) only, and that no other
+      // entry keeps as it is: its price changes in place, so it keeps its listing and what is left of it.
+      const near = kept.find((k) => !used.has(k.id) && !wanted(k) && repriceOf(k, w, cfg.acceptOnTheirOwn) !== null);
+      if (near) {
+        try {
+          await kit.repriceOffer(near.id, repriceOf(near, w, cfg.acceptOnTheirOwn)!);
+          used.add(near.id);
+          notes.delete(`reprice:${near.id}`);
+          say(`Offer #${near.id} repriced: ${describeOffer(w, usdc)}.`);
+          continue;
+        } catch (e) {
+          note(`reprice:${near.id}`, `Offer #${near.id} could not be repriced (${explain(e)}); a new listing takes its place.`);
+        }
       }
       const short = await fundsShort(kit, w, usdc);
       if (short) {
@@ -787,6 +826,46 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
         note(`cancel:${k.id}`, `Offer #${k.id}, which the config no longer lists, could not be cancelled yet (${explain(e)}).`);
       }
     }
+  };
+
+  // The recurring orders' next times (one per `take` entry; a changed config can change the list).
+  let due: number[] = [];
+
+  /**
+   * The config file, read again before each sync: a change to its offers, bids
+   * or recurring orders is taken up while the bot runs, with no restart. A file
+   * that cannot be read or used, or that also changes a setting only a restart
+   * takes up (keys, data folder, network, RPCs, ...), changes nothing; the bot
+   * goes on with the config it has and says why once.
+   */
+  const reloadConfig = async (): Promise<void> => {
+    let text: string;
+    try {
+      text = await readFile(x.configPath, 'utf8');
+    } catch (e) {
+      note('config', `The config ${x.configPath} could not be read again (${explain(e)}); the bot goes on with the one it has.`);
+      return;
+    }
+    if (text === configText) return;
+    let next: BotConfig;
+    try {
+      next = parseBotConfig(JSON.parse(text));
+    } catch (e) {
+      note('config', `The config ${x.configPath} was changed, but it cannot be used: ${e instanceof SafetyError ? e.detail : errorText(e)} The bot goes on with the one it has.`);
+      return;
+    }
+    const fixed = restartOnlyChanges(cfg, next);
+    if (fixed.length) {
+      note('config', `The config ${x.configPath} was changed, and it also changes ${fixed.join(', ')}, which the bot takes up only at a restart. Nothing of it was applied: restart the bot to take it all, or change only offers, bids and take.`);
+      return;
+    }
+    configText = text;
+    notes.delete('config');
+    const takeChanged = JSON.stringify(next.take) !== JSON.stringify(cfg.take);
+    cfg = next;
+    if (takeChanged) due = cfg.take.map(() => now());
+    const lists = cfg.offers.length ? cfg.offers.map((w) => describeOffer(w, usdc)).join('; ') : 'no offers or bids';
+    say(`The config ${x.configPath} was changed: the bot now keeps listed ${lists}${cfg.take.length ? `, with ${cfg.take.length} recurring order(s)` : ''}.`);
   };
 
   /** Cancel every open offer of the bot; true once none is left open. */
@@ -851,7 +930,7 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
     let nextSync = now() + SYNC_EVERY_MS;
     let nextNote = 0;
     let cancelled = false;
-    const due = cfg.take.map(() => now());
+    due = cfg.take.map(() => now());
     while (!runCtl.signal.aborted) {
       if (stopping) {
         if (!cancelled) cancelled = await cancelAll();
@@ -868,6 +947,7 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
         }
       } else {
         if (now() >= nextSync) {
+          await reloadConfig();
           await syncOffers();
           nextSync = now() + SYNC_EVERY_MS;
         }
