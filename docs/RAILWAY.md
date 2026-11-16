@@ -275,7 +275,7 @@ railway volume files download /market.mainnet.json market.mainnet.json
 ```
 
 ```sh
-railway volume files upload market.mainnet.json /market.mainnet.json
+railway volume files upload market.mainnet.json /market.mainnet.json --overwrite
 ```
 
 Within a minute the log says "The config ... was changed: the bot now keeps
@@ -428,7 +428,7 @@ ssh-add ~/.ssh/id_ed25519
   after a container has exited.
 - **The files on the volume:** `railway volume files list /`,
   `railway volume files download <on the volume> <here>` and
-  `railway volume files upload <here> <on the volume>`
+  `railway volume files upload <here> <on the volume>` (add `--overwrite` to replace a file that is there)
   (https://docs.railway.com/cli/volume; `railway volume --help` shows the
   form your CLI version takes). With more than one volume in the project,
   name it: `railway volume files --volume <name> list /`. The volume's `/`
@@ -598,7 +598,7 @@ commands are the ones you will need for the mainnet keys.
   restart`):
 
   ```sh
-  railway volume files upload market.mainnet.json /market.mainnet.json
+  railway volume files upload market.mainnet.json /market.mainnet.json --overwrite
   ```
 - **The kit's own bots.** The image runs `start.sh`'s commands: the two
   example bots and the market bot. A bot script of your own is not for a
