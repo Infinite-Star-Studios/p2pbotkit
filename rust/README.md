@@ -7,15 +7,19 @@ and Wi-Fi, or a 256 MB Linux board. The hardware side is in the
 [`p2pbotkithardware`](https://github.com/Infinite-Star-Studios/p2pbotkithardware)
 repository, branch `RustCustomHardware`.
 
-**Status: stage 1 of the port, the foundation. It cannot trade yet.**
+**Status: the foundation and the Phantasma reads are done. It cannot trade
+yet.**
 
-What stage 1 does:
+What it does so far:
 
 - **It reproduces every byte the kit signs.** That covers both Phantasma and
   Base, and each piece is tested against the TypeScript kit's own answers.
-- **It sends nothing and has no network code.** It does not decide whether a
-  trade should be signed: the kit's safety checks
-  ([`docs/CHECKS.md`](../docs/CHECKS.md)) are not ported yet.
+- **It reads the live Phantasma escrow.** `p2pbot check-escrow` reads the
+  escrow's code, admin, settings and open caps through the network's pinned
+  node, and checks them against the kit's pins. It reads only.
+- **It decides nothing yet.** It signs no trade and sends no transaction.
+  The kit's safety checks ([`docs/CHECKS.md`](../docs/CHECKS.md)), the Base
+  reads, the board client and the trading flows are not ported yet.
 - **Do not use it with funds.** Use the TypeScript kit (`sh start.sh`) to
   trade.
 
@@ -34,6 +38,25 @@ What stage 1 does:
 | Swap secrets, `h`, control tokens, decimal and hex forms | `src/codec.ts` | the kit's outputs, including its shared vector |
 | Store sealing (AES-256-GCM, place-bound) | `src/store.ts` | files the kit's own store wrote: they open, and re-seal to the same bytes |
 | Key files (0600, never overwritten, fsynced, read back) | `src/keys.ts`, `examples/new-keys.ts` | key files in the TypeScript format load here, and the kit's `loadKeys` reads key files made here |
+| A node's answers: VM values, and the kit's `viewInt`, `viewAddress` and `viewText` | `src/pha.ts`, phantasma-sdk-ts | the 164 decode answers of `test/fixtures/sdk-vectors.json` (see below) |
+| Escrow reads: a lock, the settings, the open cap, the admin, `hashSecret` | `src/pha.ts` `PhaReader` | the kit's 18 reads over the devnet node's recorded answers, read for read |
+| The live escrow (`p2pbot check-escrow`) | the kit's preflight, Phantasma part | on devnet, the same readings as the kit's own reader at the same moment; on devnet and mainnet, the pinned code, admin and token bounds |
+
+**How the decoder reads a node's answers.** It is strict:
+
+- **Every well-formed answer reads exactly as the kit reads it.** That
+  includes all the kit's own answers and all the recorded devnet answers:
+  204 values, exactly as the kit reads them.
+- **It refuses some malformed answers that the kit's SDK reads anyway**
+  (44 values, all built malformed or taken from the P2P service's VM corpus):
+  - a string cut short, which the SDK pads with NUL characters;
+  - a bool with no byte, which the SDK reads as true;
+  - a number with no bytes, which the SDK reads as 0;
+  - an enum the SDK would misread;
+  - anything left over or nested too deep.
+- **It never reads a different value from the kit.** It may only refuse
+  where the kit reads. The kit's readers refuse a missing value, so a gap can
+  only stop a step, never pass as a reading.
 
 The input checks go with them: an unknown or lowercase token symbol, a bad
 hash, a zero amount, a fee above 200 bps, a deadline out of range, another
@@ -50,7 +73,7 @@ same code can run on Linux and on an ESP32.
 rust/
   crates/p2pbot-core/   no_std library: pins, codec, phantasma, evm, seal
     tests/              the checks against the kit's answers
-  crates/p2pbot-cli/    `p2pbot`: key files (Linux or macOS)
+  crates/p2pbot-cli/    `p2pbot`: key files, and the read-only escrow check (Linux or macOS)
   fixtures/kit-vectors.json   the kit's answers (made by tools/make-vectors.ts)
   tools/make-vectors.ts       makes that file from the TypeScript kit
 ```
@@ -83,6 +106,13 @@ target/release/p2pbot new-keys --dir keys/mainnet --name market
 target/release/p2pbot addresses --network mainnet --pha keys/mainnet/market-pha.json --base keys/mainnet/market-base.json
 ```
 
+To check the live escrow against the pins (reads only, through the
+network's pinned node):
+
+```sh
+target/release/p2pbot check-escrow --network devnet
+```
+
 ## Keeping it in step with the TypeScript kit
 
 When the kit changes its pins, its calls or its store format, remake the
@@ -103,10 +133,10 @@ changes, and the tests accept any IV.
 Each stage keeps the rule of stage 1: it is checked against the TypeScript
 kit before the next one starts.
 
-1. **Chain readers.** These are the Phantasma JSON-RPC and the decoding of
-   VM answers, and the Base JSON-RPC (calls, logs, nonces, fees). The kit
-   already has 164 decode answers and 18 escrow reads in
-   `test/fixtures/sdk-vectors.json`, including recorded answers from devnet.
+1. **Chain readers.** Phantasma is done: the JSON-RPC client, the decoding of
+   VM answers, and the escrow reads, checked as above. Base is next: its
+   JSON-RPC (calls, the lock and claim logs, nonces, fees) and its escrow and
+   USDC reads.
 2. **The board client.** This is `src/board.ts`: the offers, takes,
    heartbeats, long-polls, and the retry and refusal rules.
 3. **The crash-safe store.** This is `src/store.ts`: the journal of sends,

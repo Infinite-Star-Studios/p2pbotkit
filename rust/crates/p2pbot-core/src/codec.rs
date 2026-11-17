@@ -86,11 +86,24 @@ fn be_to_decimal(bytes: &[u8; 32]) -> String {
     s
 }
 
+/// JavaScript's `String.prototype.trim` (which the kit uses): it removes a
+/// different set of characters than Rust's `str::trim` (not U+0085, for one).
+pub fn js_trim(s: &str) -> &str {
+    fn ws(c: char) -> bool {
+        matches!(
+            c,
+            '\u{9}' | '\u{a}' | '\u{b}' | '\u{c}' | '\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+                ..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
+        )
+    }
+    s.trim_matches(ws)
+}
+
 /// A decimal string from a Phantasma read to `0x` + 64 lowercase hex, or
 /// `None` when it is not an unsigned 256-bit integer. White space around it
 /// is allowed, as in the kit.
 pub fn decimal_to_hex(dec: &str) -> Option<String> {
-    let s = dec.trim();
+    let s = js_trim(dec);
     if s.is_empty() || s.len() > 78 || !s.bytes().all(|c| c.is_ascii_digit()) {
         return None;
     }

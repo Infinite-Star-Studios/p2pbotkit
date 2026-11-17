@@ -37,15 +37,16 @@ pub fn address_bytes_of_public_key(public_key: &[u8; 32]) -> [u8; ADDRESS_LEN] {
     b
 }
 
-/// The text of address bytes: `NULL`, or `P` (user), `X` (interop) or `S`
-/// (system) followed by base58 of the 34 bytes.
+/// The text of address bytes, as the SDK writes it: `NULL` when every byte
+/// after the kind byte is 0; else `P` (kind 1, user), `X` (kind 3 or more,
+/// interop) or `S` (kind 0 or 2), followed by base58 of the 34 bytes.
 pub fn address_text(bytes: &[u8; ADDRESS_LEN]) -> String {
-    if bytes.iter().all(|&b| b == 0) {
+    if bytes[1..].iter().all(|&b| b == 0) {
         return String::from("NULL");
     }
     let prefix = match bytes[0] {
         1 => 'P',
-        3 => 'X',
+        k if k >= 3 => 'X',
         _ => 'S',
     };
     let mut s = String::new();
