@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/p2pbot-core", "crates/p2pbot-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Infinite-Star-Studios/p2pbotkit"
+
+[profile.release]
+# Small binaries for small boards.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

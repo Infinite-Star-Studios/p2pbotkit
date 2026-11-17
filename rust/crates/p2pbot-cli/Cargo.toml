@@ -1,0 +1,18 @@
+[package]
+name = "p2pbot-cli"
+description = "Command line for the Rust port of the Saturn P2P bot kit: key files compatible with the TypeScript kit."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "p2pbot"
+path = "src/main.rs"
+
+[dependencies]
+p2pbot-core = { path = "../p2pbot-core" }
+getrandom = "0.2"
+serde_json = "1"
+zeroize = "1"
+hex = "0.4"

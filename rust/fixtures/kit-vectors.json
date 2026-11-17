@@ -1,0 +1,882 @@
+{
+ "about": "Made by rust/tools/make-vectors.ts from the TypeScript kit; see that file.",
+ "kit": "0.3.0",
+ "pins": {
+  "phaContract": "saturnescrow",
+  "defaultApi": "https://apiops.saturnx.cc",
+  "usdcDecimals": 6,
+  "maxFeeBps": 200,
+  "minTradeUsdc": "1000000",
+  "soulReserve": "110000000",
+  "clockSkewMax": 300,
+  "phaLockGas": {
+   "price": 100000,
+   "limit": 300000
+  },
+  "phaTxLabels": {
+   "lock": "SATURN_p2pLock",
+   "claim": "SATURN_p2pClaim",
+   "refund": "SATURN_p2pRefund"
+  },
+  "phaTxTtlMs": 300000,
+  "phaHashVectors": [
+   {
+    "secret": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "digest": "0x66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
+   },
+   {
+    "secret": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "digest": "0xaf9613760f72635fbdb44a5a0a63c39f12af30f950a6ee5c971be188e89c4051"
+   },
+   {
+    "secret": "0x8000000000000000000000000000000000000000000000000000000000000000",
+    "digest": "0x84b3f13b0a4fbcce4c3f811e0313e00dcbd27431c229eff576598be8d1afb848"
+   },
+   {
+    "secret": "0xabababababababababababababababababababababababababababababababab",
+    "digest": "0x9a2db2e23f1504cd056606553ac049c5e718e8f9ce9233876df1a7a1821af885"
+   }
+  ],
+  "cancelGas": "21000",
+  "permitSeconds": 1800,
+  "permitMaxSeconds": 7200,
+  "tokens": [
+   {
+    "symbol": "C",
+    "decimals": 6,
+    "min": "1000000",
+    "max": "10000000000",
+    "offerMax": "100000000000",
+    "priceMax": "1000000000000",
+    "gas": false,
+    "stake": false,
+    "enabled": true
+   },
+   {
+    "symbol": "RA",
+    "decimals": 9,
+    "min": "1000000000",
+    "max": "5000000000000",
+    "offerMax": "10000000000000",
+    "priceMax": "1000000000000",
+    "gas": false,
+    "stake": false,
+    "enabled": true
+   },
+   {
+    "symbol": "TAZ",
+    "decimals": 9,
+    "min": "1000000000",
+    "max": "100000000000000",
+    "offerMax": "10000000000000000",
+    "priceMax": "1000000000000",
+    "gas": false,
+    "stake": false,
+    "enabled": true
+   },
+   {
+    "symbol": "SOUL",
+    "decimals": 8,
+    "min": "100000000",
+    "max": "100000000000000",
+    "offerMax": "10000000000000000",
+    "priceMax": "1000000000000",
+    "gas": false,
+    "stake": true,
+    "enabled": true
+   },
+   {
+    "symbol": "KCAL",
+    "decimals": 10,
+    "min": "10000000000",
+    "max": "300000000000000000",
+    "offerMax": "3000000000000000000",
+    "priceMax": "1000000000000",
+    "gas": true,
+    "stake": false,
+    "enabled": true
+   }
+  ],
+  "config": {
+   "devnet": {
+    "network": "devnet",
+    "phaContract": "saturnescrow",
+    "phaCodeSha256": "ca1521581d1632dac9c0579817044e76253977f685c95240343ce76358e4fd99",
+    "phaAdmin": "P2KBNc6TpAqLi5LEBHgX62BA3uqa6d87NefwRmJ825fbJ8D",
+    "phaDraining": [],
+    "phaClaimKcal": "30000000000",
+    "pha": {
+     "rpcUrl": "https://devnet.phantasma.info/rpc",
+     "rpcHosts": [
+      "devnet.phantasma.info"
+     ],
+     "nexus": "testnet",
+     "chain": "main",
+     "explorerUrl": "https://devnet-explorer.phantasma.info"
+    },
+    "base": {
+     "name": "Base Sepolia",
+     "chainId": 84532,
+     "rpcUrl": "https://sepolia.base.org",
+     "explorerUrl": "https://sepolia.basescan.org",
+     "swap": "0x952Cd62D3575Fd1B434faAE1B48FBDD0eD0a891d",
+     "usdc": "0x1eCcc4Ff269087d80cEcE6EE46f658C496E9A358",
+     "usdcSymbol": "mUSDC",
+     "nativeCurrency": {
+      "name": "Sepolia Ether",
+      "symbol": "ETH",
+      "decimals": 18
+     },
+     "confirmBlocks": 3,
+     "confirmSafe": false,
+     "usdcHasBlacklist": false,
+     "usdcMin": "1000000",
+     "usdcMax": "100000000000",
+     "permit": {
+      "name": "Mock USD Coin",
+      "version": "1"
+     },
+     "feeCaps": {
+      "maxGas": "600000",
+      "maxFeePerGas": "5000000000",
+      "maxPriorityFeePerGas": "2000000000",
+      "maxFeeWei": "2000000000000000"
+     },
+     "faucetMax": "10000000000",
+     "lockWithPermitGas": "350000"
+    },
+    "timing": {
+     "phaLock": 2400,
+     "safety": 900,
+     "revealMin": 300,
+     "baseLockLead": 600,
+     "revealAllowance": 300,
+     "claimMargin": 180,
+     "claimWatch": 60,
+     "refundGrace": 30,
+     "lockSlack": 900,
+     "baseLockWindow": 900,
+     "baseLockSignLead": 300,
+     "phaRefundGrace": 60,
+     "baseRefundGrace": 30
+    }
+   },
+   "mainnet": {
+    "network": "mainnet",
+    "phaContract": "saturnescrow",
+    "phaCodeSha256": "ca1521581d1632dac9c0579817044e76253977f685c95240343ce76358e4fd99",
+    "phaAdmin": "P2KBH6mEVXiXgaGqUjafg49oviuXvpTLhskWprpzq1BkYph",
+    "phaDraining": [],
+    "phaClaimKcal": "30000000000",
+    "pha": {
+     "rpcUrl": "https://pharpc1.phantasma.info/rpc",
+     "rpcHosts": [
+      "pharpc1.phantasma.info"
+     ],
+     "nexus": "mainnet",
+     "chain": "main",
+     "explorerUrl": "https://explorer.phantasma.info"
+    },
+    "base": {
+     "name": "Base",
+     "chainId": 8453,
+     "rpcUrl": "https://mainnet.base.org",
+     "explorerUrl": "https://basescan.org",
+     "swap": "0x32A77cfC4B3c1F99378Bf5CCcca1531D3A1392A7",
+     "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+     "usdcSymbol": "USDC",
+     "nativeCurrency": {
+      "name": "Ether",
+      "symbol": "ETH",
+      "decimals": 18
+     },
+     "confirmBlocks": 0,
+     "confirmSafe": true,
+     "usdcHasBlacklist": true,
+     "usdcMin": "1000000",
+     "usdcMax": "10000000000",
+     "permit": {
+      "name": "USD Coin",
+      "version": "2"
+     },
+     "feeCaps": {
+      "maxGas": "600000",
+      "maxFeePerGas": "5000000000",
+      "maxPriorityFeePerGas": "2000000000",
+      "maxFeeWei": "2000000000000000"
+     },
+     "faucetMax": "0",
+     "lockWithPermitGas": "350000"
+    },
+    "timing": {
+     "phaLock": 43200,
+     "safety": 21600,
+     "revealMin": 3600,
+     "baseLockLead": 600,
+     "revealAllowance": 1800,
+     "claimMargin": 1800,
+     "claimWatch": 300,
+     "refundGrace": 30,
+     "lockSlack": 900,
+     "baseLockWindow": 1800,
+     "baseLockSignLead": 300,
+     "phaRefundGrace": 60,
+     "baseRefundGrace": 30
+    }
+   }
+  },
+  "roles": {
+   "pha": [
+    [
+     "P2KBH6mEVXiXgaGqUjafg49oviuXvpTLhskWprpzq1BkYph",
+     "the mainnet escrow admin (PHA_ADMIN)"
+    ],
+    [
+     "P2KBNc6TpAqLi5LEBHgX62BA3uqa6d87NefwRmJ825fbJ8D",
+     "the devnet escrow admin (PHA_ADMIN)"
+    ],
+    [
+     "P2KBPHBKq1xuoSajuKxQCd7RfCfGFyoczoHQdVxacEUc9As",
+     "Saturn's admin key"
+    ],
+    [
+     "P2KJBzzwGWLkDz5HUtuHQ7ydUWmbyAtFukwytu8qFtbRkuX",
+     "the retired devnet keeper"
+    ],
+    [
+     "P2KKFuFZNpiFdtgWQ68DHuTtwqnjBMgTv2hArZrmQYmf4gx",
+     "the devnet keeper (Phantasma claims and refunds)"
+    ]
+   ],
+   "base": [
+    [
+     "0x6ec2a535685d5ce5f143b8c0d9bf5f612295b703",
+     "the retired devnet keeper (claims)"
+    ],
+    [
+     "0x8701a821221266800a6df354701e79fdb5ab80a6",
+     "the devnet keeper (claims)"
+    ],
+    [
+     "0x941536821262b424997cb212bddfc97cad7fd6f6",
+     "the SaturnSwap owner"
+    ],
+    [
+     "0xa93bc149ff1de9f20fa1198e2edb4ffb69ece58a",
+     "the devnet keeper (refunds and withdrawOwed)"
+    ],
+    [
+     "0xe16fe62e009961682f3a7f42642f36f5e46962f8",
+     "the retired devnet keeper (refunds)"
+    ]
+   ]
+  }
+ },
+ "keys": [
+  {
+   "label": "saturn-p2p-bot-kit sdk vector key 0",
+   "base": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78"
+  },
+  {
+   "label": "saturn-p2p-bot-kit sdk vector key 1",
+   "base": "0x073640f0737a66858AE1ec54213535ca71F3e6e0"
+  },
+  {
+   "label": "saturn-p2p-bot-kit sdk vector key 2",
+   "base": "0xC85812837EF18dF4194b9f6A8127940748E08991"
+  },
+  {
+   "label": "saturn-p2p-bot-kit sdk vector key 3",
+   "base": "0x44DD9ac0Cd18021EBd859b8A64d5689C294Ea69d"
+  },
+  {
+   "label": "saturn-p2p-bot-kit sdk vector key 4",
+   "base": "0xcb14Fb64fDf141b144F7D272549b4dC27673215E"
+  },
+  {
+   "label": "saturn-p2p-bot-kit sdk vector key 5",
+   "base": "0xFa7B64d1D95dd81d2b0420b382B5171CBF3A19C5"
+  },
+  {
+   "label": "saturn-p2p-bot-kit sdk vector key 6",
+   "base": "0x22315430e723541654D9dCBb167E8EDbD52B9674"
+  },
+  {
+   "label": "saturn-p2p-bot-kit sdk vector key 7",
+   "base": "0x7EF2D2947b542B62DCBD22A1f9719921B9a72652"
+  }
+ ],
+ "evm": [
+  {
+   "network": "devnet",
+   "chainId": 84532,
+   "domainSeparator": "0x92d40a4033c64801b564006c6f25a3951503e9f45a3cd4ee16a7a7f8b88938d2",
+   "calls": {
+    "approve": {
+     "input": {
+      "amount": "1000000"
+     },
+     "out": {
+      "to": "0x1eccc4ff269087d80cece6ee46f658c496e9a358",
+      "fn": "approve",
+      "data": "0x095ea7b3000000000000000000000000952cd62d3575fd1b434faae1b48fbdd0ed0a891d00000000000000000000000000000000000000000000000000000000000f4240"
+     }
+    },
+    "lock": {
+     "input": {
+      "h": "0xec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689",
+      "amount": "1000000",
+      "claimer": "0x073640f0737a66858AE1ec54213535ca71F3e6e0",
+      "deadline": 1795003600,
+      "maxFeeBps": 50
+     },
+     "out": {
+      "to": "0x952cd62d3575fd1b434faae1b48fbdd0ed0a891d",
+      "fn": "lock",
+      "data": "0x608e1714ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be86890000000000000000000000001eccc4ff269087d80cece6ee46f658c496e9a35800000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032"
+     }
+    },
+    "lockWithPermit": {
+     "input": {
+      "h": "0xec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689",
+      "amount": "1000000",
+      "claimer": "0x073640f0737a66858AE1ec54213535ca71F3e6e0",
+      "deadline": 1795003600,
+      "maxFeeBps": 50,
+      "permitDeadline": 1795001800,
+      "v": 28,
+      "r": "0xd01671a516b765faa770c4c2d573e9ea920065fe228ccb16a3cef76df07a7096",
+      "s": "0x3d3059bca3348aee2651fe7e79853a6b0351136d77a233fe6885cebb0a6009f9"
+     },
+     "out": {
+      "to": "0x952cd62d3575fd1b434faae1b48fbdd0ed0a891d",
+      "fn": "lockWithPermit",
+      "data": "0x9bc06f51ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be86890000000000000000000000001eccc4ff269087d80cece6ee46f658c496e9a35800000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032000000000000000000000000000000000000000000000000000000006afd8dc8000000000000000000000000000000000000000000000000000000000000001cd01671a516b765faa770c4c2d573e9ea920065fe228ccb16a3cef76df07a70963d3059bca3348aee2651fe7e79853a6b0351136d77a233fe6885cebb0a6009f9"
+     }
+    },
+    "claim": {
+     "input": {
+      "secret": "0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e",
+      "sender": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78"
+     },
+     "out": {
+      "to": "0x952cd62d3575fd1b434faae1b48fbdd0ed0a891d",
+      "fn": "claim",
+      "data": "0x96c144f06b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e00000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78"
+     }
+    },
+    "refund": {
+     "input": {
+      "h": "0xec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689",
+      "sender": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78"
+     },
+     "out": {
+      "to": "0x952cd62d3575fd1b434faae1b48fbdd0ed0a891d",
+      "fn": "refund",
+      "data": "0x45b4032cec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be868900000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78"
+     }
+    },
+    "withdrawOwed": {
+     "input": {
+      "claimer": "0x073640f0737a66858AE1ec54213535ca71F3e6e0"
+     },
+     "out": {
+      "to": "0x952cd62d3575fd1b434faae1b48fbdd0ed0a891d",
+      "fn": "withdrawOwed",
+      "data": "0xc2cff6840000000000000000000000001eccc4ff269087d80cece6ee46f658c496e9a358000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0"
+     }
+    },
+    "cancel": {
+     "input": {
+      "from": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78"
+     },
+     "out": {
+      "to": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "fn": "cancel",
+      "data": "0x"
+     }
+    }
+   },
+   "permits": [
+    {
+     "input": {
+      "owner": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78",
+      "amount": "1000000",
+      "nonce": "0",
+      "deadline": 1795000000
+     },
+     "key": 0,
+     "digest": "0x06338fee5732714beed15c23b84adcc44bdb16304a16a01f9c3ff1a40dd0ce4b",
+     "signature": "0xd01671a516b765faa770c4c2d573e9ea920065fe228ccb16a3cef76df07a70963d3059bca3348aee2651fe7e79853a6b0351136d77a233fe6885cebb0a6009f91c",
+     "v": 28,
+     "yParity": 1,
+     "r": "0xd01671a516b765faa770c4c2d573e9ea920065fe228ccb16a3cef76df07a7096",
+     "s": "0x3d3059bca3348aee2651fe7e79853a6b0351136d77a233fe6885cebb0a6009f9"
+    },
+    {
+     "input": {
+      "owner": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78",
+      "amount": "123456789",
+      "nonce": "7",
+      "deadline": 1795001800
+     },
+     "key": 0,
+     "digest": "0x0db4a9b65bc481b5ae4b3bbe888ff2e4e8b15b6f249b8f6911a25f478bf964f3",
+     "signature": "0x4b2ba3e3c2ac75d2d30717694f3b82b183a7d5ea11fb8c68852f7f30e7229ef54d7bb3d786fef6fce34b92f74794bd3afba527ef85caa8bdefdb9470b21d384e1c",
+     "v": 28,
+     "yParity": 1,
+     "r": "0x4b2ba3e3c2ac75d2d30717694f3b82b183a7d5ea11fb8c68852f7f30e7229ef5",
+     "s": "0x4d7bb3d786fef6fce34b92f74794bd3afba527ef85caa8bdefdb9470b21d384e"
+    }
+   ],
+   "txs": [
+    {
+     "fn": "approve",
+     "key": 0,
+     "prepared": {
+      "chainId": 84532,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 3,
+      "gas": "250000",
+      "maxFeePerGas": "1500000004",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x1eccc4ff269087d80cece6ee46f658c496e9a358",
+      "data": "0x095ea7b3000000000000000000000000952cd62d3575fd1b434faae1b48fbdd0ed0a891d00000000000000000000000000000000000000000000000000000000000f4240",
+      "need": "0"
+     },
+     "unsigned": "0x02f86f83014a3403830f42408459682f048303d090941eccc4ff269087d80cece6ee46f658c496e9a35880b844095ea7b3000000000000000000000000952cd62d3575fd1b434faae1b48fbdd0ed0a891d00000000000000000000000000000000000000000000000000000000000f4240c0",
+     "signed": "0x02f8b283014a3403830f42408459682f048303d090941eccc4ff269087d80cece6ee46f658c496e9a35880b844095ea7b3000000000000000000000000952cd62d3575fd1b434faae1b48fbdd0ed0a891d00000000000000000000000000000000000000000000000000000000000f4240c080a063b4954a51c4bd14256ff9adc31b56063139b69309af2028c79b368adbe4ca36a05e4616553c36e156b1b57467978274586090561903040bda72191029ce52f714",
+     "hash": "0x25f5ce897d437fe51f5c44f6cbe7078c03313615d8f05a68108f0e4012fb051c"
+    },
+    {
+     "fn": "lock",
+     "key": 0,
+     "prepared": {
+      "chainId": 84532,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 4,
+      "gas": "250000",
+      "maxFeePerGas": "1500000005",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x952cd62d3575fd1b434faae1b48fbdd0ed0a891d",
+      "data": "0x608e1714ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be86890000000000000000000000001eccc4ff269087d80cece6ee46f658c496e9a35800000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032",
+      "need": "0"
+     },
+     "unsigned": "0x02f8ef83014a3404830f42408459682f058303d09094952cd62d3575fd1b434faae1b48fbdd0ed0a891d80b8c4608e1714ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be86890000000000000000000000001eccc4ff269087d80cece6ee46f658c496e9a35800000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032c0",
+     "signed": "0x02f9013283014a3404830f42408459682f058303d09094952cd62d3575fd1b434faae1b48fbdd0ed0a891d80b8c4608e1714ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be86890000000000000000000000001eccc4ff269087d80cece6ee46f658c496e9a35800000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032c080a0d4429654da70562830a256255c11432857bcebab3038e54483ea666d822de7d5a00f57b210b97fd964032b8f977adfc2cf87f4a09579111bc912e9e3e03cf59caa",
+     "hash": "0xe5b9c781fe40216c17e7f3298c657d287cc5ddbc2457d45f7d1d1f563c2d1f61"
+    },
+    {
+     "fn": "claim",
+     "key": 0,
+     "prepared": {
+      "chainId": 84532,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 5,
+      "gas": "250000",
+      "maxFeePerGas": "1500000006",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x952cd62d3575fd1b434faae1b48fbdd0ed0a891d",
+      "data": "0x96c144f06b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e00000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78",
+      "need": "0"
+     },
+     "unsigned": "0x02f86f83014a3405830f42408459682f068303d09094952cd62d3575fd1b434faae1b48fbdd0ed0a891d80b84496c144f06b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e00000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78c0",
+     "signed": "0x02f8b283014a3405830f42408459682f068303d09094952cd62d3575fd1b434faae1b48fbdd0ed0a891d80b84496c144f06b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e00000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78c080a05911f821a54bf6b641d45a296a2acb6b8a0e65ed4b8b3131ee3a85c8c325e94ea0400df03f9decadda9361f411ded9d4dde45477cce4a8754f6cba3edc64955ec3",
+     "hash": "0x726f712373a82981bebcc2ef0d9ff2fa091bd66c31facffc8cf1f4200f2edc01"
+    },
+    {
+     "fn": "refund",
+     "key": 0,
+     "prepared": {
+      "chainId": 84532,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 6,
+      "gas": "250000",
+      "maxFeePerGas": "1500000007",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x952cd62d3575fd1b434faae1b48fbdd0ed0a891d",
+      "data": "0x45b4032cec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be868900000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78",
+      "need": "0"
+     },
+     "unsigned": "0x02f86f83014a3406830f42408459682f078303d09094952cd62d3575fd1b434faae1b48fbdd0ed0a891d80b84445b4032cec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be868900000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78c0",
+     "signed": "0x02f8b283014a3406830f42408459682f078303d09094952cd62d3575fd1b434faae1b48fbdd0ed0a891d80b84445b4032cec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be868900000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78c080a05114a25ca3ef6c373aa085df717ac6941837b7fbc19f692a7d4c72ca1ad19cf3a0230f8be76cb664a4b7bf2676d934b9fc2235f1039725afa3b50096a37683a0f8",
+     "hash": "0x4a04cc9534a339376aef806f365f780ad71e16f890b366eef83b232292bae959"
+    },
+    {
+     "fn": "cancel",
+     "key": 0,
+     "prepared": {
+      "chainId": 84532,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 7,
+      "gas": "21000",
+      "maxFeePerGas": "1500000008",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "data": "0x",
+      "need": "0"
+     },
+     "unsigned": "0x02e983014a3407830f42408459682f088252089446ccfddf40a1b04980e6cd05153b67a786258f788080c0",
+     "signed": "0x02f86c83014a3407830f42408459682f088252089446ccfddf40a1b04980e6cd05153b67a786258f788080c001a06a5fd080aa22c8e6ad20dfc3d8e465ae8f370ee39f46340f3b7173277303580da0539de7d6952af820b915e1122976aa8cd6d54c5a4e93ba34be677ba5e05e2105",
+     "hash": "0x669e710bebd60537019c6a498baf56fc42654862843ee56875c7150cdbad69cd"
+    }
+   ]
+  },
+  {
+   "network": "mainnet",
+   "chainId": 8453,
+   "domainSeparator": "0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f",
+   "calls": {
+    "approve": {
+     "input": {
+      "amount": "1000000"
+     },
+     "out": {
+      "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "fn": "approve",
+      "data": "0x095ea7b300000000000000000000000032a77cfc4b3c1f99378bf5cccca1531d3a1392a700000000000000000000000000000000000000000000000000000000000f4240"
+     }
+    },
+    "lock": {
+     "input": {
+      "h": "0xec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689",
+      "amount": "1000000",
+      "claimer": "0x073640f0737a66858AE1ec54213535ca71F3e6e0",
+      "deadline": 1795003600,
+      "maxFeeBps": 50
+     },
+     "out": {
+      "to": "0x32a77cfc4b3c1f99378bf5cccca1531d3a1392a7",
+      "fn": "lock",
+      "data": "0x608e1714ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032"
+     }
+    },
+    "lockWithPermit": {
+     "input": {
+      "h": "0xec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689",
+      "amount": "1000000",
+      "claimer": "0x073640f0737a66858AE1ec54213535ca71F3e6e0",
+      "deadline": 1795003600,
+      "maxFeeBps": 50,
+      "permitDeadline": 1795001800,
+      "v": 28,
+      "r": "0x91b785129817e92863abdf5d16ce8e7b94afcf597766bfb24cd5fc61def3f210",
+      "s": "0x68ff208f20095ffb6c796186d9766c38f13f9dd939e01c47d3c30c0b4cc0c570"
+     },
+     "out": {
+      "to": "0x32a77cfc4b3c1f99378bf5cccca1531d3a1392a7",
+      "fn": "lockWithPermit",
+      "data": "0x9bc06f51ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032000000000000000000000000000000000000000000000000000000006afd8dc8000000000000000000000000000000000000000000000000000000000000001c91b785129817e92863abdf5d16ce8e7b94afcf597766bfb24cd5fc61def3f21068ff208f20095ffb6c796186d9766c38f13f9dd939e01c47d3c30c0b4cc0c570"
+     }
+    },
+    "claim": {
+     "input": {
+      "secret": "0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e",
+      "sender": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78"
+     },
+     "out": {
+      "to": "0x32a77cfc4b3c1f99378bf5cccca1531d3a1392a7",
+      "fn": "claim",
+      "data": "0x96c144f06b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e00000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78"
+     }
+    },
+    "refund": {
+     "input": {
+      "h": "0xec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689",
+      "sender": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78"
+     },
+     "out": {
+      "to": "0x32a77cfc4b3c1f99378bf5cccca1531d3a1392a7",
+      "fn": "refund",
+      "data": "0x45b4032cec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be868900000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78"
+     }
+    },
+    "withdrawOwed": {
+     "input": {
+      "claimer": "0x073640f0737a66858AE1ec54213535ca71F3e6e0"
+     },
+     "out": {
+      "to": "0x32a77cfc4b3c1f99378bf5cccca1531d3a1392a7",
+      "fn": "withdrawOwed",
+      "data": "0xc2cff684000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0"
+     }
+    },
+    "cancel": {
+     "input": {
+      "from": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78"
+     },
+     "out": {
+      "to": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "fn": "cancel",
+      "data": "0x"
+     }
+    }
+   },
+   "permits": [
+    {
+     "input": {
+      "owner": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78",
+      "amount": "1000000",
+      "nonce": "0",
+      "deadline": 1795000000
+     },
+     "key": 0,
+     "digest": "0x9eb28671956889ed08d45fa815a4b764be05408605e3b54a84500cbe12603255",
+     "signature": "0x91b785129817e92863abdf5d16ce8e7b94afcf597766bfb24cd5fc61def3f21068ff208f20095ffb6c796186d9766c38f13f9dd939e01c47d3c30c0b4cc0c5701c",
+     "v": 28,
+     "yParity": 1,
+     "r": "0x91b785129817e92863abdf5d16ce8e7b94afcf597766bfb24cd5fc61def3f210",
+     "s": "0x68ff208f20095ffb6c796186d9766c38f13f9dd939e01c47d3c30c0b4cc0c570"
+    },
+    {
+     "input": {
+      "owner": "0x46cCFDDf40A1b04980e6cd05153b67a786258f78",
+      "amount": "123456789",
+      "nonce": "7",
+      "deadline": 1795001800
+     },
+     "key": 0,
+     "digest": "0xdb347075908deba35cbf260ec9a01302373416eefa690c7fe96d0f7b966d1b87",
+     "signature": "0x171d57e0534364e077745247c54098c0460fa5299137f04d06b0aee260f1cc16210fc5f0a45f569150d2e16e70b28d2551b26af6afa287ac7bfd053a1dffff321c",
+     "v": 28,
+     "yParity": 1,
+     "r": "0x171d57e0534364e077745247c54098c0460fa5299137f04d06b0aee260f1cc16",
+     "s": "0x210fc5f0a45f569150d2e16e70b28d2551b26af6afa287ac7bfd053a1dffff32"
+    }
+   ],
+   "txs": [
+    {
+     "fn": "approve",
+     "key": 0,
+     "prepared": {
+      "chainId": 8453,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 3,
+      "gas": "250000",
+      "maxFeePerGas": "1500000004",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "data": "0x095ea7b300000000000000000000000032a77cfc4b3c1f99378bf5cccca1531d3a1392a700000000000000000000000000000000000000000000000000000000000f4240",
+      "need": "0"
+     },
+     "unsigned": "0x02f86e82210503830f42408459682f048303d09094833589fcd6edb6e08f4c7c32d4f71b54bda0291380b844095ea7b300000000000000000000000032a77cfc4b3c1f99378bf5cccca1531d3a1392a700000000000000000000000000000000000000000000000000000000000f4240c0",
+     "signed": "0x02f8b182210503830f42408459682f048303d09094833589fcd6edb6e08f4c7c32d4f71b54bda0291380b844095ea7b300000000000000000000000032a77cfc4b3c1f99378bf5cccca1531d3a1392a700000000000000000000000000000000000000000000000000000000000f4240c001a04f357bfcef51324dc7dbc94cb067731c70e909cd35f8feaa9847fb4fb5a7e3f5a07c34ec4b32aa4ed8059cbd747b0ca17ad0886982b8975e20f181ce7a50a4211c",
+     "hash": "0x9e0989e293188624d15cd55be09ae7351c13f9fc8c1e1d0c4f4d27bf4a239cd6"
+    },
+    {
+     "fn": "lock",
+     "key": 0,
+     "prepared": {
+      "chainId": 8453,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 4,
+      "gas": "250000",
+      "maxFeePerGas": "1500000005",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x32a77cfc4b3c1f99378bf5cccca1531d3a1392a7",
+      "data": "0x608e1714ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032",
+      "need": "0"
+     },
+     "unsigned": "0x02f8ee82210504830f42408459682f058303d0909432a77cfc4b3c1f99378bf5cccca1531d3a1392a780b8c4608e1714ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032c0",
+     "signed": "0x02f9013182210504830f42408459682f058303d0909432a77cfc4b3c1f99378bf5cccca1531d3a1392a780b8c4608e1714ec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000073640f0737a66858ae1ec54213535ca71f3e6e0000000000000000000000000000000000000000000000000000000006afd94d00000000000000000000000000000000000000000000000000000000000000032c080a05ac0793242acfb006cdf20550bbc53734c34c6109e15ab3918b24ad8dac96fa9a053ff6d8046bafdc43811ff21fd35e5c85bfb5a45c845137a55719a631619328c",
+     "hash": "0x2c8e46e445899fe8af7e38899a4e7bdbe5a7921e2f5cc0df59524a909774a874"
+    },
+    {
+     "fn": "claim",
+     "key": 0,
+     "prepared": {
+      "chainId": 8453,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 5,
+      "gas": "250000",
+      "maxFeePerGas": "1500000006",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x32a77cfc4b3c1f99378bf5cccca1531d3a1392a7",
+      "data": "0x96c144f06b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e00000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78",
+      "need": "0"
+     },
+     "unsigned": "0x02f86e82210505830f42408459682f068303d0909432a77cfc4b3c1f99378bf5cccca1531d3a1392a780b84496c144f06b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e00000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78c0",
+     "signed": "0x02f8b182210505830f42408459682f068303d0909432a77cfc4b3c1f99378bf5cccca1531d3a1392a780b84496c144f06b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e00000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78c001a0082387adf1069a03cec294a95b2b14f2cf79b0333a0850007e0cbddd88b10730a06d1a3918bf0a79fde52f5cf073d69742bf686a37c52935ce2e387e1f94bf1e46",
+     "hash": "0x9df49cba0aec4a392aab45e181bb07084b17c3f75d8abe04f841917b3ed21abb"
+    },
+    {
+     "fn": "refund",
+     "key": 0,
+     "prepared": {
+      "chainId": 8453,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 6,
+      "gas": "250000",
+      "maxFeePerGas": "1500000007",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x32a77cfc4b3c1f99378bf5cccca1531d3a1392a7",
+      "data": "0x45b4032cec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be868900000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78",
+      "need": "0"
+     },
+     "unsigned": "0x02f86e82210506830f42408459682f078303d0909432a77cfc4b3c1f99378bf5cccca1531d3a1392a780b84445b4032cec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be868900000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78c0",
+     "signed": "0x02f8b182210506830f42408459682f078303d0909432a77cfc4b3c1f99378bf5cccca1531d3a1392a780b84445b4032cec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be868900000000000000000000000046ccfddf40a1b04980e6cd05153b67a786258f78c080a084520b1681fda57ab90cb3aacc5c5c309096b5177837627f9ed97b790e9f11d6a0749bd12e0af2ca0f8911d81eae2d2741f02f391e9be1252903650dd2ca7f9a34",
+     "hash": "0xb43713c18c2c802899f5ce44f3206b401af6c6f6ee0cd0d1f5945ea54f6ed5ef"
+    },
+    {
+     "fn": "cancel",
+     "key": 0,
+     "prepared": {
+      "chainId": 8453,
+      "from": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "nonce": 7,
+      "gas": "21000",
+      "maxFeePerGas": "1500000008",
+      "maxPriorityFeePerGas": "1000000",
+      "to": "0x46ccfddf40a1b04980e6cd05153b67a786258f78",
+      "data": "0x",
+      "need": "0"
+     },
+     "unsigned": "0x02e882210507830f42408459682f088252089446ccfddf40a1b04980e6cd05153b67a786258f788080c0",
+     "signed": "0x02f86b82210507830f42408459682f088252089446ccfddf40a1b04980e6cd05153b67a786258f788080c001a04721c83c70b937ee29b68b482b844ab54a0daeb6fcc92a626b3f69a446ad9432a0075a85401622e56b396943248e3d5b0432fcd589230b8536957746a7a2c4501a",
+     "hash": "0x9f89dc5ee688eb6bccfc4693f4c39c20d735c5990870235370c8589aee4b9ba0"
+    }
+   ]
+  }
+ ],
+ "codec": {
+  "tokenHashes": [
+   {
+    "token": "0000000000000000000000000000000000000000000000000000000000000000",
+    "hash": "60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55"
+   },
+   {
+    "token": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "hash": "df0790f236013511e91fa4532fb7761f62320a51a3868dabf4a13fe5f53e3263"
+   },
+   {
+    "token": "3c469e9d6c5875d37a43f353d4f88e61fcf812c66eee3457465a40b0da4153e0",
+    "hash": "db37d21181592000efad06f87a00afba59f9c99b11e119d118be2b929c3387ce"
+   }
+  ],
+  "secretHashes": [
+   {
+    "secret": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "h": "0x66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
+   },
+   {
+    "secret": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "h": "0xaf9613760f72635fbdb44a5a0a63c39f12af30f950a6ee5c971be188e89c4051"
+   },
+   {
+    "secret": "0x8000000000000000000000000000000000000000000000000000000000000000",
+    "h": "0x84b3f13b0a4fbcce4c3f811e0313e00dcbd27431c229eff576598be8d1afb848"
+   },
+   {
+    "secret": "0xabababababababababababababababababababababababababababababababab",
+    "h": "0x9a2db2e23f1504cd056606553ac049c5e718e8f9ce9233876df1a7a1821af885"
+   },
+   {
+    "secret": "0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e",
+    "h": "0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b"
+   },
+   {
+    "secret": "0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e",
+    "h": "0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b"
+   },
+   {
+    "secret": "0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e",
+    "h": "0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b"
+   },
+   {
+    "secret": "0x5485cb5d03981cc3bd989290a6be33ca392c013279a5c3c3fd10a1cae57e1460",
+    "h": "0x1b5a183e4ddc5bfce136e4e7e083bd0e61f0ca5ff000e8b27e88b1944631466c"
+   }
+  ],
+  "decimals": [
+   {
+    "hex": "0xec65fdad9f506ca4c08485ff5afaa0abb3461a95b6a36b8cda1b223960be8689",
+    "decimal": "106926034641867734953012321227425653420484813078136747464141494547690649716361"
+   },
+   {
+    "hex": "0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e",
+    "decimal": "48634116646864186014548877472963265288129672160871235450417210826772487973758"
+   },
+   {
+    "hex": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "decimal": "0"
+   },
+   {
+    "hex": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "decimal": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+   },
+   {
+    "hex": "0x0000000000000000000000000000000000000000000000000000000000000001",
+    "decimal": "1"
+   }
+  ],
+  "notDecimal": [
+   {
+    "input": "",
+    "hex": null
+   },
+   {
+    "input": "-1",
+    "hex": null
+   },
+   {
+    "input": "1.5",
+    "hex": null
+   },
+   {
+    "input": "abc",
+    "hex": null
+   },
+   {
+    "input": " 12 ",
+    "hex": "0x000000000000000000000000000000000000000000000000000000000000000c"
+   },
+   {
+    "input": "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+    "hex": null
+   }
+  ]
+ },
+ "seals": {
+  "key": "fc78665d651a1c95f87228056e60568c7869afa0c1317aba4ea9d6b9e7d8b2f8",
+  "files": [
+   {
+    "network": "devnet",
+    "rel": "secrets/0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b.json",
+    "file": "{\"sealed\":\"aes-256-gcm\",\"v\":1,\"iv\":\"r3ziF6UyVEFB5lB2\",\"tag\":\"V49YKiZ0U20WEhYPOb2ntw==\",\"data\":\"A2wfFmrIwncxkIg0AcRO1/QD+CGyXCVwSYOXFgkshtPkVBNuL+77ifH1ilq5B8j00gdJnBJX+/xLF3rHFj+TmZGXVDGjv7K86bt+BixXEwOaNstFdKmo+hzUP7YzDZLJrbFbNxf2CRCcqeWwxQSDqGUdwB0aa8vKa5UGKFUgy4kPKVeLE5UjB+eBkuKj7NgcSDe8bhI07+oLZS/dZp9sxPKowmvx8fUdlKnC6LmX7FUvJKLdnnxeYtV87bnxhDF302XtIQvgWgSAHNpkfrNNjCRlvNyktKqzVBP6UXFI5TFj9jukQA0BAcjS39MumvpmYVaoje1EBeX4NOXCA6kLKXQ3zl5fvdIph2BNB6HC97jstYJlffrjZFNkiteZsyY4qYMumxY8onKq/wTZ1ACFD9OabZl8XmeJM63V7yWznSzXLEKidNR5zHXMByn2FECdp0bihO65Tl3Aa9C9RJQkjz0T2qP9k8lQ7lDS929ghwcH0QJ0YZdi3uolgdWlbAoXOM01s/io70c2EJ2HC+IfS7P6mwiKK4UrpjcL9Jr/UFsztT+n\"}\n",
+    "plain": "{\n  \"v\": 1,\n  \"secret\": \"0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e\",\n  \"h\": \"0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b\",\n  \"tradeId\": 42,\n  \"network\": \"devnet\",\n  \"symbol\": \"TAZ\",\n  \"taz\": \"200000000\",\n  \"sPha\": \"P2KJECxUM4DUw6VU8ihTKAXxXB1iAAA62Kv1QzjLWPKpgaL\",\n  \"bPha\": \"P2K7d34cFvyo3ZH5bKg1Gxs8i5yfRbJZ8RVkMZ3XHg7MJMk\",\n  \"role\": \"S\",\n  \"createdAt\": 1795000000000\n}\n",
+    "record": {
+     "v": 1,
+     "secret": "0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e",
+     "h": "0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b",
+     "tradeId": 42,
+     "network": "devnet",
+     "symbol": "TAZ",
+     "taz": "200000000",
+     "sPha": "P2KJECxUM4DUw6VU8ihTKAXxXB1iAAA62Kv1QzjLWPKpgaL",
+     "bPha": "P2K7d34cFvyo3ZH5bKg1Gxs8i5yfRbJZ8RVkMZ3XHg7MJMk",
+     "role": "S",
+     "createdAt": 1795000000000
+    }
+   },
+   {
+    "network": "mainnet",
+    "rel": "secrets/0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b.json",
+    "file": "{\"sealed\":\"aes-256-gcm\",\"v\":1,\"iv\":\"AXsuP4wuB8LESoBh\",\"tag\":\"c/yCE8DxXnRkVhoWvzW4pA==\",\"data\":\"YfKxkDDkgseMwuEZFKT0c1vlb7WddNYnSRi72pZQmTS+xU3FydRne3V5RfuxPumKFm4xYIppXN4su8SiU4ZES9T10/QgfCx3VJGiCy9NgO/uyXAISaJwLWeGqwaE0TqoVJc2069q0rRvlanqp7DwU0JByxXcuyzCAJomEo/mvFYPgg5OFxpr21K3z3+GclUXiTZUyXSR3bcFGJRBpjucFYCHQsX6tgIYLFqXpY/+Qxi/zOtRN0GJl4MJxYwNW+Yd3l5v5nG8nAmcht3fI16VlVa2d/ZqS5pj69bfnVe9QCU/a3zXSeOFC5OEjb46p73J/Zrhhh/1Zg4mA7EBNyjael9FZlZlqpOyctPdKLrVCUk7BVpKI1I4Jw6KOX+qAEd7bXP7kVxcVmqoMqPOxRpXK+peUymnki+9PJ3U345ho69+UShZ6KS1c+F556xpz9abTzhY979rehZo9MZZoUqp0r3m4gn0IoYVFNeWZWHmpUYdgYFRyyjqMXHfJB/h+qKNNAU9ZHwbMfCsBpWVB9nH+b403kCDc1ysQ1FikhCDnvkTJn8vQQ==\"}\n",
+    "plain": "{\n  \"v\": 1,\n  \"secret\": \"0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e\",\n  \"h\": \"0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b\",\n  \"tradeId\": 42,\n  \"network\": \"mainnet\",\n  \"symbol\": \"TAZ\",\n  \"taz\": \"200000000\",\n  \"sPha\": \"P2KJECxUM4DUw6VU8ihTKAXxXB1iAAA62Kv1QzjLWPKpgaL\",\n  \"bPha\": \"P2K7d34cFvyo3ZH5bKg1Gxs8i5yfRbJZ8RVkMZ3XHg7MJMk\",\n  \"role\": \"S\",\n  \"createdAt\": 1795000000000\n}\n",
+    "record": {
+     "v": 1,
+     "secret": "0x6b85ef3dff7bb6fea77cd2b8662cb19b7a6895139e8e86e307e1875e456dab7e",
+     "h": "0x00ff8b7b01bcfb230b94a578720cfd20500883fe9984a3c85cc169ac963fdc9b",
+     "tradeId": 42,
+     "network": "mainnet",
+     "symbol": "TAZ",
+     "taz": "200000000",
+     "sPha": "P2KJECxUM4DUw6VU8ihTKAXxXB1iAAA62Kv1QzjLWPKpgaL",
+     "bPha": "P2K7d34cFvyo3ZH5bKg1Gxs8i5yfRbJZ8RVkMZ3XHg7MJMk",
+     "role": "S",
+     "createdAt": 1795000000000
+    }
+   }
+  ]
+ }
+}
