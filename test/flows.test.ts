@@ -23,15 +23,15 @@
  */
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, chmod, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import { PhantasmaKeys, Transaction } from 'phantasma-sdk-ts';
 import { generatePrivateKey } from 'viem/accounts';
 import { decodeFunctionData, keccak256, parseTransaction, recoverTransactionAddress, type AbiEvent } from 'viem';
-import { createKit, FLOW_CODES, SafetyError, type Kit, type KitOptions, type StepResult, type Policy } from '../src/index.js';
+import { createKit, createHostedKit, SqlBackend, FLOW_CODES, SafetyError, type Kit, type KitOptions, type HostedKitOptions, type SqlDatabase, type StepResult, type Policy } from '../src/index.js';
 import { BoardError } from '../src/errors.js';
 import { hexToDecimal, decimalToHex, sha256Hex, hashOfSecret } from '../src/codec.js';
 import { P2P_CONFIG, P2P_TOKENS, BOARD, phaPinned, baseDeployed } from '../src/pins.js';
@@ -2441,5 +2441,136 @@ describe('wave B review: a following offer is checked as the site checks it befo
     assert.ok(ok.follow);
     await assert.rejects(s.kit.repriceOffer(ok.id, { follow: { offsetBps: 200, limitPrice: '1.05', dailyMax: '2000' } }), (e: unknown) => e instanceof SafetyError && e.code === 'OFFER_INVALID');
     assert.equal(w.board.count('POST', /\/reprice$/), 0);
+  });
+});
+
+// ── createHostedKit: a host with no file system (a Cloudflare Durable Object) ──
+
+// node:sqlite runs without a flag from Node 22.13; on an older Node 22 these tests are skipped.
+let Sqlite: typeof import('node:sqlite').DatabaseSync | null = null;
+try { ({ DatabaseSync: Sqlite } = await import('node:sqlite')); } catch { /* Node 22 before 22.13 */ }
+type SqliteDb = import('node:sqlite').DatabaseSync;
+
+/** A database as a Durable Object hands it over (ctx.storage.sql): each exec runs at once. A new handle on the same db is a new instance of the host. */
+function sqlHandle(db: SqliteDb): SqlDatabase {
+  return { exec: (q, ...b) => { const rows = db.prepare(q).all(...b); return { toArray: () => rows }; } };
+}
+
+/** A hosted kit for `bot`: its key files' JSON text as the host's secrets, its records in `db` under the store name "seller". */
+async function hostedFor(w: World, bot: Bot, db: SqliteDb, o: Partial<HostedKitOptions> = {}): Promise<KitHandle> {
+  const logs: string[] = [];
+  const kit = await createHostedKit({
+    network: 'devnet', api: 'http://127.0.0.1:9', log: (l) => logs.push(l), env: {},
+    keys: { pha: await readFile(bot.phaKeyFile, 'utf8'), base: await readFile(bot.baseKeyFile, 'utf8') },
+    store: new SqlBackend(sqlHandle(db), { network: 'devnet', name: 'seller', where: 'durable-object:seller/devnet' }),
+    ...o,
+    internals: {
+      fetch: w.board.fetch as typeof fetch, pha: w.pha, base: w.base, now: w.vt.now, sleep: w.vt.jump,
+      signerSleep: async () => {}, signerWait: { phaTries: 1, phaIntervalMs: 0, baseTimeoutMs: 1, basePollMs: 1, allowanceTries: 2, allowancePollMs: 0 },
+      argv: ['workerd'], pollWaitS: 0,
+      ...(o.internals ?? {})
+    }
+  });
+  kits.push(kit);
+  return { kit, logs, bot };
+}
+
+describe('createHostedKit: the keys from a host\'s secrets, the store on SQLite (a Durable Object)', { skip: Sqlite ? false : 'node:sqlite needs Node 22.13 or later' }, () => {
+  test('a hosted seller trades a sell offer to the end with a buyer on files, and resumes after its host dies mid-trade: one lock, one claim', async () => {
+    const w = world();
+    const db = new Sqlite!(':memory:');
+    const storeKey = randomBytes(32).toString('hex');
+    const sBot = await newBot(w);
+    const s = await hostedFor(w, sBot, db, { storeKey });
+    assert.deepEqual(s.kit.address, { pha: sBot.pha, base: s.kit.address.base });
+    assert.equal(s.kit.address.base.toLowerCase(), sBot.base, 'the addresses of the keys given as text');
+    assert.equal(s.kit.store.dir, 'durable-object:seller/devnet');
+    assert.equal(s.kit.store.sealed, true);
+    const b = await kitFor(w, await newBot(w));
+    const offer = await s.kit.postOffer(SELL);
+    const id = (await b.kit.take(offer.id, '2')).id;
+    // The seller alone, up to its lock, reported to the board.
+    await stepUntil(w, s, id, (r) => r.action === 'reportPhaLock' && r.outcome === 'done', { policy: { acceptAfterS: 0 } });
+    assert.equal(w.board.trades.get(id)!.t.status, 'pha_locked');
+    assert.equal(w.pha.count('lock'), 1);
+    // The host dies (an eviction, a deploy): nothing is closed, and a new instance opens the same database.
+    const s2 = await hostedFor(w, sBot, db, { storeKey });
+    assert.ok(s2.logs.some((l) => /an earlier instance held durable-object:seller\/devnet .* taking over its lock/.test(l)), 'the old lock row is taken over, and logged');
+    await stepBoth(w, s2, b, id, async () => !!(await s2.kit.store.getTrade(id))?.endedAt && !!(await b.kit.store.getTrade(id))?.endedAt);
+    assert.equal(w.board.trades.get(id)!.t.status, 'done');
+    assert.equal(w.pha.count('lock'), 1, 'one lock across the restart');
+    assert.equal(w.base.count('claim'), 1, 'the seller claimed its USDC once');
+    // The old instance, were any of it still running, writes nothing more.
+    await assert.rejects(s.kit.store.patchTrade(id, { status: 'done' }), (e: unknown) => e instanceof SafetyError && e.code === 'STORE_LOCK_LOST');
+    // Its rows: the swap secret and the tokens are sealed with the store key.
+    const secret = (await s2.kit.store.secretsOfTrade(id))[0]!.secret;
+    const rows = db.prepare('SELECT kind, text FROM kit_store WHERE store = ?').all('seller/devnet') as Array<{ kind: string; text: string }>;
+    assert.ok(rows.length > 0 && rows.every((r) => !r.text.includes(secret.slice(2))), 'the swap secret is in no row as plain text');
+    assert.ok(rows.filter((r) => r.kind === 'secrets').every((r) => /"sealed":"aes-256-gcm"/.test(r.text)));
+    assertClean(s, [secret]);
+    assertClean(s2, [secret]);
+  });
+
+  test('two hosted bots trade through run() in sessions, as the Cloudflare fleet runs them: a new kit on the same SQLite every 30 s, plain polls; one lock and one claim on each chain', async () => {
+    const w = world();
+    const sBot = await newBot(w), bBot = await newBot(w);
+    const sDb = new Sqlite!(':memory:'), bDb = new Sqlite!(':memory:');
+    const policy = { acceptAfterS: 0, claimWatchS: 0 };
+    // Each session builds its kits anew, as the fleet does: the same databases, waits on the virtual clock.
+    const kitsOf = async () => Promise.all([
+      hostedFor(w, sBot, sDb, { store: new SqlBackend(sqlHandle(sDb), { network: 'devnet', name: 'seller' }), internals: { sleep: w.vt.sleep } }),
+      hostedFor(w, bBot, bDb, { store: new SqlBackend(sqlHandle(bDb), { network: 'devnet', name: 'buyer' }), internals: { sleep: w.vt.sleep } })
+    ]);
+    /** End a session: stop run(), let its last steps finish on the virtual clock, close the kits. */
+    const endSession = async (pair: KitHandle[], ctl: AbortController, runs: Array<Promise<void>>) => {
+      ctl.abort();
+      let over = false;
+      const all = Promise.all(runs).then(() => { over = true; });
+      for (let i = 0; i < 600 && !over; i++) await w.vt.advance(1_000);
+      await all;
+      for (const h of pair) await h.kit.close();
+    };
+    let pair = await kitsOf();
+    const offer = await pair[0]!.kit.postOffer(SELL);
+    let ctl = new AbortController();
+    let runs = pair.map((h) => h.kit.run(policy, ctl.signal));
+    await w.vt.advance(1_000);
+    const [taken] = await pair[1]!.kit.buyUpTo({ symbol: 'TAZ', amount: '2', maxPrice: '1.08' });
+    assert.ok(taken && offer.id > 0);
+    const id = taken.id;
+    let sessions = 1;
+    const ended = async () => !!(await pair[0]!.kit.store.getTrade(id))?.endedAt && !!(await pair[1]!.kit.store.getTrade(id))?.endedAt;
+    for (; sessions < 60 && !(await ended()); sessions++) {
+      for (let i = 0; i < 30 && !(await ended()); i++) await w.vt.advance(1_000);
+      await endSession(pair, ctl, runs);
+      pair = await kitsOf();
+      ctl = new AbortController();
+      runs = pair.map((h) => h.kit.run(policy, ctl.signal));
+    }
+    await endSession(pair, ctl, runs);
+    assert.ok(sessions > 2, `the trade spanned several sessions (${sessions})`);
+    assert.equal(w.board.trades.get(id)!.t.status, 'done');
+    assert.equal(w.pha.count('lock'), 1, 'one Phantasma lock across every session');
+    assert.equal(w.base.count('lockWithPermit'), 1, 'one USDC lock');
+    assert.equal(w.base.count('claim'), 1, 'the seller claimed its USDC once');
+    assert.equal(w.pha.count('claim'), 1, 'the buyer claimed its TAZ once');
+    assert.equal(w.board.maxHeld, 0, 'no long-poll held: plain polls only');
+    for (const h of pair) assertClean(h);
+  });
+
+  test('refused before anything is read: no keys or store, key text that is not a key file\'s JSON, mainnet without both switches', async () => {
+    const w = world();
+    const bot = await newBot(w);
+    const db = new Sqlite!(':memory:');
+    const bad = (code: string, re?: RegExp) => (e: unknown) => e instanceof SafetyError && e.code === code && (!re || re.test(e.detail));
+    await assert.rejects(hostedFor(w, bot, db, { keys: undefined as never }), bad('BAD_INPUT', /keys/));
+    await assert.rejects(hostedFor(w, bot, db, { store: {} as never }), bad('BAD_INPUT', /StoreBackend/));
+    await assert.rejects(hostedFor(w, bot, db, { network: 'mainnet' }), bad('NETWORK_OFF'));
+    assert.equal(w.board.calls.length, 0, 'no board read before those refusals');
+    const wif = PhantasmaKeys.generate().toWIF();
+    await assert.rejects(hostedFor(w, bot, db, { keys: { pha: wif, base: '{}' } }), (e: unknown) => bad('KEY_FILE', /secret PHA_KEY is not JSON/)(e) && !(e as Error).message.includes(wif));
+    await assert.rejects(hostedFor(w, bot, db, { keys: { pha: JSON.stringify({ wif }), base: '{"privateKey":"0x12"}', names: { base: 'MY_BASE' } } }), bad('KEY_FILE', /Base key secret MY_BASE needs "privateKey"/));
+    await assert.rejects(hostedFor(w, bot, db, { keys: { pha: ' ', base: '{}' } }), bad('KEY_FILE', /secret PHA_KEY is empty/));
+    await assert.rejects(hostedFor(w, bot, db, { storeKey: 'abc' }), bad('STORE_KEY', /32 bytes/));
   });
 });

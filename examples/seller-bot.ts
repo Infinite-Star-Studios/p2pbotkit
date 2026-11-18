@@ -279,6 +279,40 @@ export function parseBotConfig(raw: unknown): BotConfig {
   };
 }
 
+/**
+ * A bot config for a host that keeps the keys, the state and the API key
+ * itself (a Cloudflare Durable Object, cloudflare/): a config without
+ * "keys", "dataDir" or "apiKeyFile", which name files on a machine. Its keys
+ * are the host's secrets and its records live in the host's own store.
+ */
+export type HostedBotConfig = Omit<BotConfig, 'keys' | 'dataDir' | 'apiKeyFile'>;
+
+/** The keys a hosted config may not have: they name files, and a host keeps those things itself. */
+const HOST_KEPT = ['keys', 'dataDir', 'apiKeyFile'] as const;
+
+/**
+ * Check a hosted bot config (HostedBotConfig) as parseBotConfig checks a
+ * config: the same rules for every offer, bid and order, and the same
+ * defaults. `apiKey`: whether the host has an API key for this bot (instant
+ * offers need one); `apiKeyName` names where it comes from, for the message.
+ */
+export function parseHostedConfig(raw: unknown, o: { apiKey: boolean; apiKeyName?: string }): HostedBotConfig {
+  if (!isObj(raw)) throw configError('A bot config is a JSON object.');
+  // null names no file (the example configs say "apiKeyFile": null): it is left out like an absent key.
+  for (const k of HOST_KEPT) {
+    if (raw[k] !== undefined && raw[k] !== null) throw configError(`The config has "${k}", which names a file on a machine. Here the keys, the state and the API key are kept by the host (its secrets and its own store): remove "${k}".`);
+  }
+  const rest = Object.fromEntries(Object.entries(raw).filter(([k]) => !(HOST_KEPT as readonly string[]).includes(k)));
+  onlyKeys(rest, CONFIG_KEYS.filter((k) => !(HOST_KEPT as readonly string[]).includes(k)), 'The config');
+  // The rest is checked exactly as parseBotConfig checks it; the three host-kept fields are only placeholders here.
+  const { keys: _keys, dataDir: _dataDir, apiKeyFile: _apiKeyFile, ...cfg } = parseBotConfig({ ...rest, keys: { pha: '(host)', base: '(host)' }, dataDir: '(host)', apiKeyFile: '(host)' });
+  const instantAt = cfg.offers.findIndex((w) => w.mode === 'instant');
+  if (instantAt >= 0 && !o.apiKey) {
+    throw configError(`offers[${instantAt}].mode "instant" needs an API key the owner flagged for instant offers${o.apiKeyName ? `: set ${o.apiKeyName}` : ''}.`);
+  }
+  return cfg;
+}
+
 /** The example config of an example bot, next to this file. */
 export function defaultConfigPath(role: Exclude<Role, 'market'>): string {
   return fileURLToPath(new URL(`./${role}.devnet.example.json`, import.meta.url));
@@ -339,7 +373,7 @@ export function kitOptions(cfg: BotConfig, o: { cwd: string; mainnet?: boolean; 
  * checks pass), except while the bot stops: a take then gets no answer and
  * the board cancels it after its accept time.
  */
-export function botPolicy(cfg: Pick<BotConfig, 'acceptAfterS' | 'claimWatchS'>, stopping: () => boolean = () => false): Policy {
+export function botPolicy(cfg: Pick<HostedBotConfig, 'acceptAfterS' | 'claimWatchS'>, stopping: () => boolean = () => false): Policy {
   return {
     ...(cfg.acceptAfterS !== null ? { acceptAfterS: cfg.acceptAfterS } : {}),
     ...(cfg.claimWatchS !== null ? { claimWatchS: cfg.claimWatchS } : {}),
@@ -363,8 +397,9 @@ export function readOnlyTransports(network: Network, given: KitInternals | undef
     }
     return inner(input, init);
   }) as typeof fetch;
-  const p: PhaRpc = given?.pha ?? phaRpc(network, rpc.pha ? { url: rpc.pha } : {});
-  const b: BaseClient = given?.base ?? baseClient(network, rpc.base ? { url: rpc.base } : {});
+  const rpcFetch = given?.rpcFetch ? { fetch: given.rpcFetch } : {};
+  const p: PhaRpc = given?.pha ?? phaRpc(network, { ...(rpc.pha ? { url: rpc.pha } : {}), ...rpcFetch });
+  const b: BaseClient = given?.base ?? baseClient(network, { ...(rpc.base ? { url: rpc.base } : {}), ...rpcFetch });
   const pha: PhaRpc = {
     views: (c) => p.views(c), contract: (n) => p.contract(n), balances: (a) => p.balances(a), transaction: (h) => p.transaction(h),
     sendRaw: async () => { chainSends++; throw new Error('dry run: a Phantasma send was refused'); }
@@ -593,7 +628,7 @@ export async function runBot(o: RunBotOptions): Promise<number> {
  * trades it. A failed or off escrow item of a token the config does not
  * trade stops nothing.
  */
-function printPreflight(report: PreflightReport, cfg: BotConfig, say: (l: string) => void): string[] {
+export function printPreflight(report: PreflightReport, cfg: Pick<HostedBotConfig, 'offers' | 'take'>, say: (l: string) => void): string[] {
   say(`Addresses: Phantasma ${report.address.pha}, Base ${report.address.base}`);
   const used = new Set([...cfg.offers.map((x) => x.symbol), ...cfg.take.map((x) => x.symbol)]);
   const blocking: string[] = [];
@@ -609,7 +644,7 @@ function printPreflight(report: PreflightReport, cfg: BotConfig, say: (l: string
 }
 
 /** The rest of a dry run: the board's GETs and the plan. Sends nothing. */
-async function dryRunRest(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void; usdc: string; blocking: string[]; refused: () => { boardWrites: number; chainSends: number } }): Promise<number> {
+export async function dryRunRest(kit: BotKit, cfg: Pick<HostedBotConfig, 'offers' | 'take' | 'acceptOnTheirOwn'>, x: { say: (l: string) => void; usdc: string; blocking: string[]; refused: () => { boardWrites: number; chainSends: number } }): Promise<number> {
   const { say, usdc } = x;
   try {
     const offers = await kit.board.offers();
@@ -715,9 +750,50 @@ export function referenceLines(ref: Reference, cfg: Pick<BotConfig, 'offers' | '
   return out;
 }
 
-/** The trading part of a run, until a Ctrl-C (see the file comment). */
-async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void; usdc: string; now: () => number; sleep: SleepFn; signals: SignalSource }): Promise<number> {
-  const { say, usdc, now, sleep, signals } = x;
+/**
+ * For a host that runs the bot in sessions rather than as one long process:
+ * a Cloudflare Durable Object, whose alarms run for minutes at a time
+ * (cloudflare/). Each session builds the kit, runs trade() until `until`
+ * aborts, and closes the kit; the next session carries on from the store.
+ */
+export interface TradeSession {
+  /**
+   * Aborting it ends the session at once, as a second Ctrl-C ends a run, but
+   * as a pause: nothing is cancelled, the offers stay listed (the next
+   * session's heartbeats come well inside their 90 s), and every trade stays
+   * in the store for the next session. trade() then returns SESSION_PAUSED.
+   */
+  readonly until: AbortSignal;
+  /** The bot was told to stop before this session: it cancels its offers and finishes its trades, as after a first Ctrl-C. */
+  readonly stopping?: boolean;
+  /** When each recurring order (cfg.take[i]) is next due, kept by the host across sessions: read at the start, written after each order. */
+  readonly takeDue?: { load(): number[] | Promise<number[]>; save(due: readonly number[]): void | Promise<void> };
+}
+
+/** What trade() returns when its session ended (TradeSession.until): nothing was stopped, and the next session carries on. */
+export const SESSION_PAUSED = 75;
+
+export interface TradeOptions {
+  /** Receives the bot's lines (redacted). */
+  say: (l: string) => void;
+  /** The USDC symbol of the network, for lines. */
+  usdc: string;
+  now: () => number;
+  sleep: SleepFn;
+  /** The first SIGINT or SIGTERM stops gracefully (offers cancelled, trades finished); a second one ends at once. */
+  signals: SignalSource;
+  /** Run as one session of a host (TradeSession) rather than until a Ctrl-C. */
+  session?: TradeSession;
+}
+
+/**
+ * The trading part of a run, until a Ctrl-C (see the file comment), or for
+ * one session of a host (TradeOptions.session). Returns 0 once a stop has
+ * finished every trade, 1 when run() stopped on a failure, 130 after a
+ * second Ctrl-C, and SESSION_PAUSED when the session's `until` ended it.
+ */
+export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions): Promise<number> {
+  const { say, usdc, now, sleep, signals, session } = x;
   const notes = new Map<string, string>();
   const note = (key: string, line: string) => {
     if (notes.get(key) === line) return;
@@ -725,8 +801,10 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
     say(line);
   };
   const runCtl = new AbortController();
-  let stopping = false;
+  let stopping = session?.stopping === true;
   let forced = false;
+  let paused = false;
+  let finished = false;
   let presses = 0;
   let lastPress = 0;
   let wake: (() => void) | null = null;
@@ -742,7 +820,9 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
     lastPress = t;
     if (presses === 1) {
       stopping = true;
-      say('Stopping: no new offers or takes. The bot cancels its offers and finishes its running trades, then exits. Press Ctrl-C again to exit now (its state is kept; the next start resumes the trades).');
+      say(session
+        ? 'Stopping: no new offers or takes. The bot cancels its offers and finishes its running trades, then stops (its state is kept).'
+        : 'Stopping: no new offers or takes. The bot cancels its offers and finishes its running trades, then exits. Press Ctrl-C again to exit now (its state is kept; the next start resumes the trades).');
     } else {
       forced = true;
       say('Exiting now. The bot\'s state is kept: run it again to resume its trades.');
@@ -752,6 +832,15 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
   };
   signals.on('SIGINT', onSignal);
   signals.on('SIGTERM', onSignal);
+  // A host's session ends at `until`: a pause, not a stop (nothing is cancelled; the next session carries on).
+  const onUntil = () => {
+    if (finished) return;
+    paused = true;
+    runCtl.abort();
+    wakeUp();
+  };
+  if (session?.until.aborted) onUntil();
+  else session?.until.addEventListener('abort', onUntil, { once: true });
 
   const syncOffers = async (): Promise<void> => {
     const kept = (await kit.store.listOffers()).filter((k) => k.closedAt == null);
@@ -851,12 +940,15 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
     let nextSync = now() + SYNC_EVERY_MS;
     let nextNote = 0;
     let cancelled = false;
-    const due = cfg.take.map(() => now());
+    // When each order is next due: kept by a host across its sessions, so a session's start does not take early.
+    const keptDue = session?.takeDue ? await session.takeDue.load() : [];
+    const due = cfg.take.map((_, i) => (Number.isFinite(keptDue[i]) ? keptDue[i]! : now()));
     while (!runCtl.signal.aborted) {
       if (stopping) {
         if (!cancelled) cancelled = await cancelAll();
         const open = (await kit.store.listTrades()).filter((t) => !t.endedAt);
         if (cancelled && open.length === 0) {
+          finished = true;
           say('Every trade of this bot is finished, and its offers are cancelled. Stopped.');
           runCtl.abort();
           break;
@@ -875,6 +967,7 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
           if (now() < due[i]!) continue;
           await runTake(cfg.take[i]!, i);
           due[i] = now() + cfg.take[i]!.everyS * 1000;
+          await session?.takeDue?.save(due);
         }
       }
       if (runCtl.signal.aborted) break;
@@ -887,6 +980,7 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
   } finally {
     signals.off('SIGINT', onSignal);
     signals.off('SIGTERM', onSignal);
+    session?.until.removeEventListener('abort', onUntil);
     // run() returns once its signal aborts; the kit is closed only after that.
     if (!runCtl.signal.aborted) runCtl.abort();
     if (running) await running;
@@ -895,7 +989,8 @@ async function trade(kit: BotKit, cfg: BotConfig, x: { say: (l: string) => void;
     say(`The bot stopped: ${explain(failure)}`);
     return 1;
   }
-  return forced ? 130 : 0;
+  if (forced) return 130;
+  return paused && !finished ? SESSION_PAUSED : 0;
 }
 
 /** Run a role's bot as the process's main script, and exit with its code. */

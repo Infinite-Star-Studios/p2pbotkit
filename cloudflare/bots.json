@@ -1,0 +1,14 @@
+{
+  "market": {
+    "network": "mainnet",
+    "api": "https://apiops.saturnx.cc",
+    "offers": [],
+    "bids": [],
+    "take": [],
+    "acceptOnTheirOwn": true,
+    "acceptAfterS": null,
+    "claimWatchS": null,
+    "claimMode": "self",
+    "usePermit": true
+  }
+}

@@ -7,6 +7,44 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## Unreleased
+
+The bots can run on Cloudflare (`cloudflare/`): one Durable Object runs
+every bot of a `bots.json`, in sessions driven by its alarm, with each
+bot's keys in Worker secrets and its records in the object's SQLite. On a
+machine of your own nothing changes: the files, the checks and every
+refusal are the same.
+
+- `cloudflare/`: the Worker, its Durable Object, and a control API behind a
+  token (`status`, `logs`, `dry-run`, `start` with `{"mainnet": true}` as
+  the mainnet yes, `stop`, `halt`); `cloudflare/README.md` has the setup.
+  A session runs the runner's own trading loop for about 6 minutes; its
+  end is a pause, never a stop, and the next session resumes from the
+  store. No call can change what a bot trades: that is `bots.json`,
+  deployed with the Worker.
+- The store keeps its rules in `KitStore` and its records behind a
+  `StoreBackend`: `FileBackend` is the data folder of every earlier
+  release, unchanged; `SqlBackend` (`src/store-sql.ts`) keeps the same
+  records as rows of a SQLite table, with its lock as a row of its own.
+  `openStore({ backend, key })` opens one, with the store key given as
+  itself (a host's secret) instead of a key file.
+- `createHostedKit`: `createKit` for a host with no file system of its own,
+  with the same checks, refusals and order. Its keys are the two key files'
+  JSON text (`loadKeys({ secrets })`, checked as the files are, and named by
+  their secrets in errors), its records live in a `StoreBackend`, and its
+  store key and API key come from the host's secrets.
+- `KitInternals.rpcFetch` and `baseClient({ fetch })`: the two chains'
+  requests through a host's fetch, for a runtime with no
+  `redirect: 'error'` (Cloudflare Workers). The host's fetch must never
+  follow a redirect (check 67); `cloudflare/` gives one that fails on every
+  redirect.
+- The runner (`examples/seller-bot.ts`): `parseHostedConfig` (a config
+  without `keys`, `dataDir` and `apiKeyFile`), and `trade()` with a
+  session (`TradeSession`: an end that pauses rather than stops, a stop
+  asked before the session, and the recurring orders' next times kept
+  across sessions). Run from the command line, every bot behaves as
+  before.
+
 ## 0.3.0 (13 November 2026)
 
 Token C (Credits) joins the token table; Base log searches follow Base's

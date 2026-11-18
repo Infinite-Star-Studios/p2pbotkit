@@ -211,7 +211,18 @@ export interface BaseClientOptions {
   url?: string;
   /** Per request, ms (default 15 s). */
   timeoutMs?: number;
+  /**
+   * A fetch of the host's to send every request through, for a runtime with
+   * no `redirect: 'error'` (Cloudflare Workers: KitInternals.rpcFetch). The
+   * requests then ask for `redirect: 'manual'`, which never follows a
+   * redirect either (a redirect is an answer that is not ok, so an error);
+   * the host's fetch must never follow one itself (check 67).
+   */
+  fetch?: typeof fetch;
 }
+
+/** The fetch options when a host's fetch sends the requests: a redirect is still never followed. */
+const HOSTED_FETCH_OPTIONS: Readonly<RequestInit> = Object.freeze({ redirect: 'manual' as const });
 
 /**
  * The network's Base RPC through viem. Refuses (RPC_NOT_ALLOWED) a URL that
@@ -228,7 +239,10 @@ export function baseClient(network: Network, o: BaseClientOptions = {}): BaseCli
   if (!known) throw new SafetyError(SAFETY.NETWORK_OFF, 'Unknown Base chain.');
   const chain = { ...known, rpcUrls: { default: { http: [url] } } };
   // A redirect is refused, never followed (check 67): the request, and a signed transaction in it, goes only to the host checked here.
-  const c = createPublicClient({ chain, transport: http(url, { timeout: o.timeoutMs ?? 15_000, retryCount: 1, fetchOptions: BASE_FETCH_OPTIONS }) });
+  const transport = o.fetch
+    ? http(url, { timeout: o.timeoutMs ?? 15_000, retryCount: 1, fetchOptions: HOSTED_FETCH_OPTIONS, fetchFn: o.fetch })
+    : http(url, { timeout: o.timeoutMs ?? 15_000, retryCount: 1, fetchOptions: BASE_FETCH_OPTIONS });
+  const c = createPublicClient({ chain, transport });
   const blockOf = (b: { number: bigint | null; timestamp: bigint; baseFeePerGas?: bigint | null }): BaseBlock => {
     if (b.number == null) throw new Error('Base answered a block without a number');
     return { number: b.number, timestamp: b.timestamp, baseFeePerGas: typeof b.baseFeePerGas === 'bigint' ? b.baseFeePerGas : null };

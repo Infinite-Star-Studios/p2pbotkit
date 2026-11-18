@@ -144,6 +144,16 @@ question instead. For a bot that runs for days, a service manager (systemd,
 launchd) or a tmux session suits better. `sh start.sh mainnet dry-run`
 sends nothing and needs no answer.
 
+### On Cloudflare instead of a machine of your own
+
+The bots can also run on Cloudflare, with no server of yours: one Durable
+Object runs the market bot (or every bot you list) with the same runner,
+config format and checks, on Cloudflare's Workers Paid plan ($5 a month).
+Its keys are Worker secrets there, so Cloudflare holds them, as any host
+you rent does. `cloudflare/README.md` has the setup, what changes, and how
+to move a bot there from another host: stop it cleanly first, and never run
+it in two places at once.
+
 ### Good to know
 
 - **Time:** the first start takes a few minutes (the download and the
@@ -220,6 +230,7 @@ screen session) names the network: `sh start.sh devnet`. `seller`, `buyer` and `
 | `market.mainnet.json` | The market bot's config on mainnet, your own: `start.sh` writes it, with no offers, only when it is missing. |
 | `.node/` | The Node that `start.sh` downloaded, if it did. To use it for the `npm` and `npx` commands in this README, first run `export PATH="$PWD/.node/bin:$PATH"` in the kit's folder (once per terminal). |
 | `examples/` | The bots and their configs (`seller.devnet.example.json`, `buyer.devnet.example.json`, and the market bot's template `market.mainnet.example.json`). |
+| `cloudflare/` | The bots on Cloudflare, in a Durable Object (`cloudflare/README.md`), apart from the kit: their keys are Worker secrets and their state is in the object. |
 
 `git pull` brings a new version of the kit and leaves `keys/`, `data/`,
 `market.mainnet.json` and `.node/` as they are. With the ZIP, download the
@@ -288,7 +299,8 @@ terminal) so that they use it. `npm run seller -- <options>` does what
   they hold. The kit refuses a key file that other users can read (run
   `chmod 600` on it), never takes a key from the command line, an environment
   variable or a URL, and never writes a key, a control token or a swap secret
-  to a log.
+  to a log. On Cloudflare (`cloudflare/`) the key files' content is a Worker
+  secret instead, which Cloudflare holds.
 - **Nobody can undo a trade for you.** Saturn cannot recover funds, reverse a
   lock, or stop a bot that you left running. Start on devnet, keep small
   balances on a bot's addresses, and watch it before you trust it.

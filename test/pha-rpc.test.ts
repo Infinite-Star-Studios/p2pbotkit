@@ -76,6 +76,29 @@ test('67: the Base client refuses a redirect from its RPC: the chain id read fai
   }
 });
 
+test('67 with a host\'s fetch (KitInternals.rpcFetch, for Cloudflare Workers): the Base client asks for no "error" redirect, and a redirect still fails and reaches nothing', async () => {
+  const pair = await redirectPair();
+  try {
+    const seen: RequestInit[] = [];
+    // A runtime without redirect "error" (Workers throws on it): the host's fetch is then the one that sends.
+    const hostFetch = (async (u: string | URL | Request, init?: RequestInit) => {
+      if (init?.redirect === 'error') throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+      seen.push(init!);
+      return fetch(u, init);
+    }) as typeof fetch;
+    const client = baseClient('devnet', { url: pair.from, timeoutMs: 5_000, fetch: hostFetch });
+    await assert.rejects(client.chainId());
+    await assert.rejects(client.sendRaw('0x02'));
+    assert.equal(pair.hits(), 0, 'nothing reached the host the redirect named');
+    assert.ok(seen.length >= 2 && seen.every((i) => i.redirect === 'manual'), 'every request asked never to follow a redirect');
+    // And through it, a plain answer is read as usual.
+    const ok = baseClient('devnet', { fetch: (async () => new Response('{"jsonrpc":"2.0","id":0,"result":"0x14a34"}', { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch });
+    assert.equal(await ok.chainId(), 84532);
+  } finally {
+    await pair.close();
+  }
+});
+
 // ── What PhaReader reads from a node's answers ──────────────────────────────
 //
 // The escrow reads over a node that answers each invokeRawScript with the next

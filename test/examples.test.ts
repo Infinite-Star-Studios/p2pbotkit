@@ -50,7 +50,7 @@ import type { PhaRpc, PhaCall, PhaBalance, PhaTxState } from '../src/pha.js';
 import { loadKeys } from '../src/keys.js';
 import { openStore } from '../src/store.js';
 import type { Offer, Trade } from '../src/types.js';
-import { runBot, parseBotConfig, kitOptions, botPolicy, networkGate, readOnlyTransports, defaultConfigPath, referenceLines, sameOffer, describeOffer, guardProcess, MARKET_CONFIG, type BotKit, type Role } from '../examples/seller-bot.js';
+import { runBot, parseBotConfig, parseHostedConfig, trade, SESSION_PAUSED, kitOptions, botPolicy, networkGate, readOnlyTransports, defaultConfigPath, referenceLines, sameOffer, describeOffer, guardProcess, MARKET_CONFIG, type BotKit, type Role } from '../examples/seller-bot.js';
 import { main as newKeysMain, makeKeyPairs } from '../examples/new-keys.js';
 import { main as faucetMain } from '../examples/faucet.js';
 import { main as pruneMain, pruneSecrets, KEEP_DAYS, type PruneChains } from '../examples/prune.js';
@@ -1628,6 +1628,93 @@ function fakeProcess(isTTY?: boolean) {
   };
   return { p, kills, hangUp: () => signals.emit('SIGHUP') };
 }
+
+describe('the runner in sessions (a host such as a Cloudflare Durable Object: cloudflare/)', () => {
+  /** The seller's example config without the three things a host keeps itself. */
+  async function hostedSeller(): Promise<Record<string, unknown>> {
+    const { keys: _k, dataDir: _d, ...rest } = JSON.parse(await readFile(defaultConfigPath('seller'), 'utf8')) as Record<string, unknown>;
+    return rest;
+  }
+
+  test('parseHostedConfig: the same checks as a config of files, without "keys", "dataDir" and "apiKeyFile"; instant offers need the host\'s API key', async () => {
+    const raw = await hostedSeller();
+    const { keys: _k, dataDir: _d, apiKeyFile: _a, ...trading } = parseBotConfig(JSON.parse(await readFile(defaultConfigPath('seller'), 'utf8')));
+    assert.deepEqual(parseHostedConfig(raw, { apiKey: false }), trading, 'the same config, without the files');
+    for (const k of ['keys', 'dataDir', 'apiKeyFile']) {
+      assert.throws(() => parseHostedConfig({ ...raw, [k]: 'x' }, { apiKey: false }), (e: Error & { code?: string }) => e.code === 'BAD_CONFIG' && e.message.includes(`"${k}", which names a file on a machine`));
+    }
+    assert.throws(() => parseHostedConfig({ ...raw, extra: 1 }, { apiKey: false }), (e: Error) => /unknown key "extra"/.test(e.message) && !/dataDir|keys|apiKeyFile/.test(e.message));
+    assert.throws(() => parseHostedConfig({ ...raw, offers: [{ symbol: 'TAZ', total: '30', min: '1', max: '5' }] }, { apiKey: false }), /has a "price" or a "follow", exactly one/);
+    assert.throws(() => parseHostedConfig([], { apiKey: false }), /a JSON object/);
+    const instant = { network: 'devnet', offers: [{ symbol: 'TAZ', total: '5', min: '1', max: '5', price: '1.08', mode: 'instant' }] };
+    assert.throws(() => parseHostedConfig(instant, { apiKey: false, apiKeyName: 'the secret SELLER_API_KEY' }), /offers\[0\]\.mode "instant" needs an API key the owner flagged for instant offers: set the secret SELLER_API_KEY/);
+    assert.equal(parseHostedConfig(instant, { apiKey: true }).offers[0]!.mode, 'instant');
+  });
+
+  test('a session ends at `until` as a pause: nothing cancelled, SESSION_PAUSED; the next session posts nothing twice and takes no order early', async () => {
+    const vt = new VTime();
+    const kit = new FakeKit(vt.now);
+    const cfg = parseHostedConfig(await hostedSeller(), { apiKey: false });
+    const out = sink();
+    const saved: number[][] = [];
+    const takeDue = { load: () => saved.at(-1) ?? [], save: (d: readonly number[]) => { saved.push([...d]); } };
+    const end = new AbortController();
+    const p = trade(kit as unknown as BotKit, cfg, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: end.signal, takeDue } });
+    await until(vt, () => kit.count('sellDownTo') >= 1, 'the first order', { stepMs: 1_000 });
+    assert.equal(kit.count('postOffer'), 2);
+    assert.equal(saved.length, 1, 'the order\'s next time is kept for the host');
+    assert.ok(saved[0]![0]! >= vt.now() + 110_000, 'the next order is due everyS (120 s) later');
+    end.abort();
+    assert.equal(await drive(vt, p), SESSION_PAUSED);
+    assert.equal(kit.count('cancelOffer'), 0, 'a pause cancels nothing');
+    assert.equal(kit.running, false, 'run() ended with the session');
+    assert.ok(!out.lines.some((l) => /Stopping|Stopped|Exiting/.test(l)), out.lines.join('\n'));
+    // The next session, 10 s later: its offers are still the kit's, and the order is not due yet.
+    await vt.advance(10_000);
+    const end2 = new AbortController();
+    const p2 = trade(kit as unknown as BotKit, cfg, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: end2.signal, takeDue } });
+    await until(vt, () => kit.count('run') >= 2, 'run() again', { stepMs: 1_000 });
+    assert.equal(kit.count('postOffer'), 2, 'nothing posted twice');
+    assert.equal(kit.count('sellDownTo'), 1, 'no early order at the start of a session');
+    await until(vt, () => kit.count('sellDownTo') >= 2, 'the second order, on time', { stepMs: 1_000 });
+    assert.ok(kit.calls.filter((c) => c.fn === 'sellDownTo')[1]!.at >= saved[0]![0]!, 'when it was due');
+    end2.abort();
+    assert.equal(await drive(vt, p2), SESSION_PAUSED);
+    // An `until` that has already ended: the session pauses at once.
+    const done = new AbortController();
+    done.abort();
+    assert.equal(await drive(vt, trade(kit as unknown as BotKit, cfg, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: done.signal, takeDue } })), SESSION_PAUSED);
+  });
+
+  test('a stop asked before the session (stopping): no offer or order, the offers cancelled, the trades finished, then 0; a stop signal in a session does the same', async () => {
+    const vt = new VTime();
+    const kit = new FakeKit(vt.now);
+    const cfg = parseHostedConfig(await hostedSeller(), { apiKey: false });
+    await kit.postOffer({ side: 'sell', symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08' });
+    kit.trades = [runningTrade(7)];
+    const out = sink();
+    const end = new AbortController();
+    const p = trade(kit as unknown as BotKit, cfg, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: end.signal, stopping: true } });
+    await until(vt, () => kit.count('cancelOffer') === 1, 'the offer cancelled', { stepMs: 1_000 });
+    const ok = { offer: {} as LocalOffer, checks: { ok: true as const } };
+    assert.equal(await kit.policy!.accept!({} as Trade, ok), false, 'no take is accepted while stopping');
+    for (let i = 0; i < 30; i++) await vt.advance(5_000);
+    assert.equal(kit.count('postOffer'), 1, 'no new offers');
+    assert.equal(kit.count('sellDownTo'), 0, 'no orders');
+    kit.trades = [{ ...runningTrade(7), endedAt: vt.now() } as LocalTrade];
+    assert.equal(await drive(vt, p), 0, 'stopped: every trade finished');
+    // In a session that is running: a SIGTERM from the host stops it the same way.
+    const kit2 = new FakeKit(vt.now);
+    const signals = new EventEmitter();
+    const out2 = sink();
+    const p2 = trade(kit2 as unknown as BotKit, cfg, { say: out2.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals, session: { until: new AbortController().signal } });
+    await until(vt, () => kit2.count('run') >= 1, 'the start', { stepMs: 1_000 });
+    signals.emit('SIGTERM');
+    assert.equal(await drive(vt, p2), 0);
+    assert.equal(kit2.count('cancelOffer'), 2);
+    assert.ok(out2.lines.some((l) => l.includes('then stops (its state is kept)')) && !out2.lines.some((l) => /Ctrl-C/.test(l)), out2.lines.join('\n'));
+  });
+});
 
 describe('guardProcess (mainOf): a lost output or a hangup never cuts a clean stop short', () => {
   test('EPIPE (a log pipe that closed) and EIO (a terminal that is gone) on stdout or stderr are swallowed; any other error still throws', () => {

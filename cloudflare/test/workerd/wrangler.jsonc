@@ -1,0 +1,9 @@
+// The test Worker of `npm run test:workerd` (run.mjs): local only, never deployed.
+{
+  "name": "p2p-bots-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "FLEET", "class_name": "TestFleet" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestFleet"] }]
+}

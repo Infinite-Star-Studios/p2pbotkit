@@ -1,0 +1,23 @@
+{
+  "name": "saturn-p2p-bot-kit-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run the Saturn P2P bot kit's bots in a Cloudflare Durable Object, instead of on a machine of your own.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "check-config": "tsx scripts/check-config.ts",
+    "dev": "wrangler dev",
+    "deploy": "npm run check-config && wrangler deploy",
+    "test:workerd": "node test/workerd/run.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261103.1",
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "wrangler": "4.156.2"
+  }
+}

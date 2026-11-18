@@ -1,0 +1,37 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // The Worker's name: its URL is https://<name>.<your subdomain>.workers.dev.
+  "name": "p2p-bots",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  // The kit uses node:crypto (AES-256-GCM, SHA-256) and Buffer.
+  "compatibility_flags": ["nodejs_compat"],
+
+  // One Durable Object runs every bot of bots.json, on its own SQLite.
+  "durable_objects": {
+    "bindings": [{ "name": "FLEET", "class_name": "BotFleet" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BotFleet"] }],
+
+  // A backstop only: every 10 minutes, re-arm the fleet's alarm should it ever be lost. The alarm runs the bots.
+  "triggers": { "crons": ["*/10 * * * *"] },
+
+  // A session signs and checks transactions for minutes at a time: room for its CPU (Workers Paid; 5 minutes at most).
+  "limits": { "cpu_ms": 300000 },
+
+  // The bots' lines (redacted: never a key, a token or a secret) in Workers Logs.
+  "observability": { "enabled": true },
+
+  "vars": {
+    // "1" lets a mainnet bot start (it also needs its start's own yes, {"mainnet": true}). Both switches, as for npm run market.
+    "KIT_ALLOW_MAINNET": "0"
+  }
+
+  // Secrets (npx wrangler secret put <NAME>), for each bot of bots.json, by its name in capitals ("market" -> MARKET_...):
+  //   MARKET_PHA_KEY     the bot's Phantasma key file, as it is: npx wrangler secret put MARKET_PHA_KEY < keys/mainnet/market-pha.json
+  //   MARKET_BASE_KEY    the bot's Base key file, as it is
+  //   MARKET_API_KEY     optional, recommended: the bot's API key for the board
+  //   MARKET_STORE_KEY   optional: 64 hex digits that seal its control tokens and swap secrets at rest
+  // and once for the Worker:
+  //   CONTROL_TOKEN      32 or more random characters: openssl rand -hex 32 | npx wrangler secret put CONTROL_TOKEN
+}

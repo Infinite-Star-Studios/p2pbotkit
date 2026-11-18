@@ -29,12 +29,18 @@
  * addresses may only add a key refusal, check 68), loads the two key files
  * (mode 0600, never from argv), checks that the Base RPC serves the pinned
  * chain, and opens the crash-safe store (one process per data directory).
+ *
+ * createHostedKit does all of the same, in the same order, for a host with
+ * no file system of its own (a Cloudflare Durable Object, cloudflare/): the
+ * two key files' JSON text, the API key and the store key come from the
+ * host's secret store, and the records live in a StoreBackend (SqlBackend,
+ * store-sql.ts, on the host's SQLite).
  */
 import { P2P_CONFIG, DEFAULT_API, PHA_HASH_VECTORS, MAX_FEE_BPS, P2P_TOKENS, SOUL_RESERVE, CLOCK_SKEW_MAX, networkProblem, phaRpcProblem, baseRpcProblem, type P2PNetConfig } from './pins.js';
 import { SafetyError, SAFETY } from './errors.js';
 import { redactedLog, errorText, redact, type LogFn } from './redact.js';
-import { loadKeys, readSecretFile, knownRoleProblem, type LoadedKeys } from './keys.js';
-import { openStore, type KitStore } from './store.js';
+import { loadKeys, readSecretFile, knownRoleProblem, type LoadedKeys, type KeySecrets } from './keys.js';
+import { openStore, type KitStore, type StoreBackend } from './store.js';
 import { BoardClient, BoardSession, sleep as realSleep, type SleepFn } from './board.js';
 import { devnetFaucet, type FaucetOutcome } from './faucet.js';
 import { phaRpc, PhaReader, balanceOf, type PhaRpc } from './pha.js';
@@ -84,9 +90,32 @@ export interface KitOptions {
   internals?: KitInternals;
 }
 
+/**
+ * createHostedKit's options: createKit's, for a host with no file system of
+ * its own (a Cloudflare Durable Object, cloudflare/). Its keys are the two
+ * key files' JSON text from the host's secret store, its records live in a
+ * StoreBackend (SqlBackend on the host's SQLite), and its store key and API
+ * key are given as themselves, from the same secret store.
+ */
+export interface HostedKitOptions extends Omit<KitOptions, 'phaKeyFile' | 'baseKeyFile' | 'dataDir' | 'apiKeyFile'> {
+  /** The two key files' JSON text: {"wif": "..."} and {"privateKey": "0x..."}. */
+  keys: KeySecrets;
+  /** Where the bot's records are kept: one running bot per store. */
+  store: StoreBackend;
+  /** The store key that seals tokens and secrets (64 hex digits); null or absent: no sealing. */
+  storeKey?: string | null;
+}
+
 export interface KitInternals {
   /** The board's fetch. */
   fetch?: typeof fetch;
+  /**
+   * The fetch of the two chains' own transports (when `pha` and `base` are not
+   * given), for a host whose runtime has no `redirect: 'error'` (Cloudflare
+   * Workers). It must never follow a redirect (check 67): cloudflare/ gives one
+   * that fails on every redirect.
+   */
+  rpcFetch?: typeof fetch;
   /** The Phantasma node (replaces phaRpc()). */
   pha?: PhaRpc;
   /** The Base node (replaces baseClient()). */
@@ -203,12 +232,80 @@ function keeperForbid(c: P2PConfig | null): { pha: string[]; base: string[] } {
   return { pha: str(k.phaAddress), base: [...str(k.baseAddress), ...str(k.claimAddress)] };
 }
 
+/** Where a kit's keys, API key and store come from: files (createKit), or a host's secrets and database (createHostedKit). */
+interface KitHost {
+  /** The host's own refusals of its options, before anything is read. */
+  check(): void;
+  apiKey(): Promise<string | undefined>;
+  keys(o: { network: Network; forbid: { pha: string[]; base: string[] }; log: LogFn; argv?: readonly string[] }): Promise<LoadedKeys>;
+  store(o: { network: Network; env: Record<string, string | undefined>; log: LogFn; now: () => number }): Promise<KitStore>;
+}
+
+/** createKit's host: the two 0600 key files, an optional 0600 API key file, and the crash-safe data directory. */
+function fileHost(o: KitOptions): KitHost {
+  return {
+    check() {
+      if (typeof o.dataDir !== 'string' || !o.dataDir) throw flowError('BAD_INPUT', 'dataDir names the bot\'s data directory.');
+      if (o.apiKey && o.apiKeyFile) throw flowError('BAD_INPUT', 'Give apiKey or apiKeyFile, not both.');
+    },
+    async apiKey() {
+      if (!o.apiKeyFile) return o.apiKey || undefined;
+      const buf = await readSecretFile(o.apiKeyFile, 'API key');
+      let key: string;
+      try {
+        key = buf.toString('utf8').trim();
+      } finally {
+        buf.fill(0);
+      }
+      if (!key) throw new SafetyError(SAFETY.KEY_FILE, `The API key file ${o.apiKeyFile} is empty.`);
+      return key;
+    },
+    keys: (k) => loadKeys({ network: k.network, phaKeyFile: o.phaKeyFile, baseKeyFile: o.baseKeyFile, forbid: k.forbid, log: k.log, argv: k.argv }),
+    store: (st) => {
+      const keyFile = o.internals?.storeKeyFile;
+      return openStore({ dataDir: o.dataDir, network: st.network, ...(keyFile !== undefined ? { keyFile } : {}), env: st.env, log: st.log, now: st.now });
+    }
+  };
+}
+
+/** createHostedKit's host: the key files' JSON text, the API key and the store key from the host's secrets; the store on its backend. */
+function secretHost(o: HostedKitOptions): KitHost {
+  return {
+    check() {
+      const k = o.keys as Partial<KeySecrets> | undefined;
+      if (!k || typeof k !== 'object' || typeof k.pha !== 'string' || typeof k.base !== 'string') throw flowError('BAD_INPUT', 'keys holds the two key files\' JSON text: { pha, base }.');
+      if (!o.store || typeof o.store !== 'object' || typeof o.store.open !== 'function') throw flowError('BAD_INPUT', 'store is the StoreBackend that keeps the bot\'s records.');
+      if (o.storeKey !== undefined && o.storeKey !== null && typeof o.storeKey !== 'string') throw flowError('BAD_INPUT', 'storeKey is the store key as 64 hex digits, or null.');
+      if (o.apiKey !== undefined && typeof o.apiKey !== 'string') throw flowError('BAD_INPUT', 'apiKey is text.');
+    },
+    async apiKey() {
+      return o.apiKey?.trim() || undefined;
+    },
+    keys: (k) => loadKeys({ network: k.network, secrets: o.keys, forbid: k.forbid, log: k.log, argv: k.argv }),
+    store: (st) => openStore({ backend: o.store, network: st.network, key: o.storeKey ?? null, env: st.env, log: st.log, now: st.now })
+  };
+}
+
 /**
  * Build a kit (build spec section 6.3). See the file comment for the order
  * of its refusals; every refusal is a SafetyError and nothing is sent.
  */
 export async function createKit(o: KitOptions): Promise<Kit> {
   if (!o || typeof o !== 'object') throw flowError('BAD_INPUT', 'createKit takes an options object.');
+  return buildKit(o, fileHost(o));
+}
+
+/**
+ * createKit for a host with no file system of its own (HostedKitOptions):
+ * the same checks, refusals and order, with the keys, the API key and the
+ * store key from the host's secrets, and the records in its StoreBackend.
+ */
+export async function createHostedKit(o: HostedKitOptions): Promise<Kit> {
+  if (!o || typeof o !== 'object') throw flowError('BAD_INPUT', 'createHostedKit takes an options object.');
+  return buildKit(o, secretHost(o));
+}
+
+async function buildKit(o: Omit<KitOptions, 'phaKeyFile' | 'baseKeyFile' | 'dataDir'>, host: KitHost): Promise<Kit> {
   const env = o.env ?? process.env;
   // Before any read: the network is open in this release (mainnet only with both switches), and both RPCs are allowed (check 67).
   const netBad = networkProblem(o.network, { allowMainnet: o.allowMainnet, env });
@@ -224,24 +321,14 @@ export async function createKit(o: KitOptions): Promise<Kit> {
   const claimMode: ClaimMode = o.claimMode ?? 'self';
   if (claimMode !== 'self' && claimMode !== 'reveal-then-self') throw flowError('BAD_INPUT', 'claimMode is "self" or "reveal-then-self".');
   if (o.usePermit !== undefined && typeof o.usePermit !== 'boolean') throw flowError('BAD_INPUT', 'usePermit is true or false.');
-  if (typeof o.dataDir !== 'string' || !o.dataDir) throw flowError('BAD_INPUT', 'dataDir names the bot\'s data directory.');
+  host.check();
   const log = redactedLog(o.log);
   const io = o.internals ?? {};
   const now = io.now ?? Date.now;
   const sleep = io.sleep ?? realSleep;
 
-  // The API key: from its 0600 file, or as given; never both.
-  if (o.apiKey && o.apiKeyFile) throw flowError('BAD_INPUT', 'Give apiKey or apiKeyFile, not both.');
-  let apiKey: string | undefined = o.apiKey || undefined;
-  if (o.apiKeyFile) {
-    const buf = await readSecretFile(o.apiKeyFile, 'API key');
-    try {
-      apiKey = buf.toString('utf8').trim();
-    } finally {
-      buf.fill(0);
-    }
-    if (!apiKey) throw new SafetyError(SAFETY.KEY_FILE, `The API key file ${o.apiKeyFile} is empty.`);
-  }
+  // The API key: from its 0600 file, or as given (a host's secret); never both.
+  const apiKey = await host.apiKey();
   const board = new BoardClient({ network, api: o.api ?? DEFAULT_API, apiKey, fetch: io.fetch, log, sleep });
 
   // /config is display only: its keeper addresses can only add a refusal of the bot's own key (check 68).
@@ -251,17 +338,18 @@ export async function createKit(o: KitOptions): Promise<Kit> {
   } catch (e) {
     log(`[kit] ${network}: the board's /config could not be read (${errorText(e)}); keys are checked against the pinned roles now and against the keeper's addresses when run() starts`);
   }
-  const keys: LoadedKeys = await loadKeys({ network, phaKeyFile: o.phaKeyFile, baseKeyFile: o.baseKeyFile, forbid: keeperForbid(config), log, argv: io.argv });
+  const keys: LoadedKeys = await host.keys({ network, forbid: keeperForbid(config), log, ...(io.argv ? { argv: io.argv } : {}) });
 
   // The chains: Phantasma on the allowlist (checked above), Base on the pinned chain (check 67).
-  const phaT = io.pha ?? phaRpc(network, { url: phaUrl });
-  const baseT = io.base ?? baseClient(network, { url: baseUrl });
+  const rpcFetch = io.rpcFetch ? { fetch: io.rpcFetch } : {};
+  const phaT = io.pha ?? phaRpc(network, { url: phaUrl, ...rpcFetch });
+  const baseT = io.base ?? baseClient(network, { url: baseUrl, ...rpcFetch });
   const pha = new PhaReader(phaT, network);
   const base = new BaseReader(baseT, network);
   const chainBad = await base.chainIdProblem();
   if (chainBad) throw new SafetyError(SAFETY.RPC_NOT_ALLOWED, chainBad);
 
-  const store = await openStore({ dataDir: o.dataDir, network, ...(io.storeKeyFile !== undefined ? { keyFile: io.storeKeyFile } : {}), env, log, now });
+  const store = await host.store({ network, env, log, now });
   try {
     const signer = createSigner({ keys, pha: phaT, base: baseT, store, now, log, ...(io.signerSleep ? { sleep: io.signerSleep } : {}), ...(io.signerWait ? { wait: io.signerWait } : {}) });
     const session = new BoardSession({ board, store, log, now });
@@ -434,7 +522,11 @@ export { P2P_TOKENS, P2P_CONFIG, BOARD, INSTANT, INSTANT_NETWORKS, INSTANT_RULES
 export type { InstantTiming } from './pins.js';
 export { PhaReader } from './pha.js';
 export { BaseReader } from './base.js';
-export type { KitStore } from './store.js';
+export type { KitStore, StoreBackend } from './store.js';
+export { FileBackend } from './store.js';
+export { SqlBackend } from './store-sql.js';
+export type { SqlDatabase, SqlBackendOptions } from './store-sql.js';
+export type { KeySecrets } from './keys.js';
 export type {
   Network, Side, Offer, Trade, TradeStatus, FeedTrade, P2PConfig, Reference, Me, LocalOffer, LocalTrade, FollowSettings, FollowState, OfferMode
 } from './types.js';

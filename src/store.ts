@@ -47,6 +47,14 @@
  * Every record is validated before it is written and when it is read; a file
  * that does not parse or does not have its shape is STORE_CORRUPT, never
  * silently skipped.
+ *
+ * Backends: the files above are the default backend (FileBackend). A host
+ * with no file system of its own (a Cloudflare Durable Object, cloudflare/)
+ * opens the store on another StoreBackend instead, such as SqlBackend
+ * (store-sql.ts), which keeps the same records as rows of a SQLite table.
+ * The record rules, the sealing and the read-back after every write are
+ * KitStore's, the same on every backend; a backend only keeps each record's
+ * text and holds the single-writer lock.
  */
 import { open, rename, link, unlink, readFile, readdir, mkdir, chmod, stat, rm, realpath } from 'node:fs/promises';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
@@ -102,16 +110,30 @@ export interface StoreHooks {
 }
 
 export interface OpenStoreOptions {
-  /** The bot's data directory; created 0700 when missing. The store lives in `<dataDir>/<network>/`. */
-  dataDir: string;
+  /** The bot's data directory; created 0700 when missing. The store lives in `<dataDir>/<network>/`. Give this or `backend`. */
+  dataDir?: string;
+  /**
+   * Somewhere other than files to keep the records (StoreBackend), for a host
+   * with no file system of its own: SqlBackend (store-sql.ts) keeps them in a
+   * SQLite database, such as a Cloudflare Durable Object's. Give this or
+   * `dataDir`.
+   */
+  backend?: StoreBackend;
   network: Network;
   /** A 32-byte key file (0600) that seals tokens and secrets. Default: env KIT_STORE_KEY_FILE; null: no sealing. */
   keyFile?: string | null;
+  /**
+   * The store key itself, for a host that keeps it in a secret store of its
+   * own rather than in a file: 32 raw bytes, or 64 hex digits as text; null:
+   * no sealing. Instead of `keyFile` (KIT_STORE_KEY_FILE is not read then).
+   */
+  key?: Uint8Array | string | null;
   env?: Record<string, string | undefined>;
   /** Receives redacted lines only. */
   log?: LogFn;
   /** ms clock, for tests. */
   now?: () => number;
+  /** Fault injection on files (FileBackend), for the crash tests. */
   hooks?: StoreHooks;
 }
 
@@ -289,7 +311,52 @@ function journalShapeProblem(r: unknown, network: Network, tradeId: number): str
   return null;
 }
 
-// ── Files ───────────────────────────────────────────────────────────────────
+// ── Backends ────────────────────────────────────────────────────────────────
+
+/**
+ * Where a store keeps its records. KitStore holds the rules (the shapes, the
+ * write-once fields, the conflicts, the sealing and the read-back of every
+ * write) and they are the same on every backend; a backend keeps the text of
+ * each record under its kind and name, and holds the store's single-writer
+ * lock.
+ *
+ * FileBackend, the default (openStore({ dataDir })), is the directory of the
+ * file comment. A host with no file system of its own brings another as
+ * openStore({ backend }): SqlBackend (store-sql.ts) keeps the records in a
+ * SQLite database, such as a Cloudflare Durable Object's.
+ *
+ * A backend's writes are atomic (a reader sees the old text or the new one,
+ * never a torn one) and durable before anything the kit sends after them
+ * goes out.
+ */
+export interface StoreBackend {
+  /** Where the records are, for messages: the store's directory, or a host's name for its database. */
+  readonly where: string;
+  /** Take the single-writer lock (STORE_LOCKED while another store holds it) and get ready, with a crash's leftovers cleared. */
+  open(o: { log: LogFn }): Promise<void>;
+  /** Throw STORE_LOCK_LOST unless this backend still holds its lock (checked before every write). */
+  assertHeld(): Promise<void>;
+  /** Release the lock, only while it is still this backend's. */
+  close(): Promise<void>;
+  /** The text of meta.json, or null when none was written. */
+  readMeta(): Promise<string | null>;
+  /** Replace the text of meta.json. */
+  writeMeta(text: string): Promise<void>;
+  /** A record's text, or null when there is none. */
+  read(kind: StoreKind, name: string): Promise<string | null>;
+  /** Write a record's text, replacing any. */
+  write(kind: StoreKind, name: string, text: string): Promise<void>;
+  /** Write a record's text only when there is none: false when there is one (nothing is written then). */
+  writeNew(kind: StoreKind, name: string, text: string): Promise<boolean>;
+  /** Remove a record: false when there was none. */
+  remove(kind: StoreKind, name: string): Promise<boolean>;
+  /** The names of the records of one kind. */
+  names(kind: StoreKind): Promise<string[]>;
+  /** Where one record is, for messages and tests. */
+  pathOf(kind: StoreKind, name: string): string;
+}
+
+// ── Files (the default backend) ─────────────────────────────────────────────
 
 const errCode = (e: unknown) => (e as NodeJS.ErrnoException | undefined)?.code;
 
@@ -332,76 +399,36 @@ function pidAlive(pid: unknown): boolean {
 
 interface LockInfo { pid: number; host: string; startedAt: number; nonce: string }
 
-/** A 32-byte store key from a key file: 32 raw bytes, or 64 hex digits (spaces around allowed). */
-async function loadStoreKey(file: string): Promise<Buffer> {
-  const buf = await readSecretFile(file, 'store key (KIT_STORE_KEY_FILE)');
-  try {
-    if (buf.length === 32) return Buffer.from(buf);
-    const text = buf.toString('utf8').trim();
-    if (/^[0-9a-fA-F]{64}$/.test(text)) return Buffer.from(text, 'hex');
-    throw new SafetyError(SAFETY.STORE_KEY, `The store key file ${file} must hold exactly 32 bytes (raw, or as 64 hex digits).`);
-  } finally {
-    buf.fill(0);
-  }
-}
-
-interface Sealed { sealed: 'aes-256-gcm'; v: 1; iv: string; tag: string; data: string }
-
-const isSealed = (o: unknown): o is Sealed => !!o && typeof o === 'object' && (o as Sealed).sealed === 'aes-256-gcm' && (o as Sealed).v === 1;
-
-/** Opens a store; see the file comment. */
-export async function openStore(o: OpenStoreOptions): Promise<KitStore> {
-  if (!isNet(o.network)) throw new SafetyError(SAFETY.NETWORK_OFF, 'The network is devnet or mainnet.');
-  if (typeof o.dataDir !== 'string' || !o.dataDir) throw new SafetyError(SAFETY.STORE_CORRUPT, 'No data directory was given.');
-  const env = o.env ?? process.env;
-  const keyFile = o.keyFile === undefined ? (env.KIT_STORE_KEY_FILE || null) : o.keyFile;
-  const key = keyFile ? await loadStoreKey(keyFile) : null;
-  const store = new KitStore(o, key);
-  await store.init();
-  return store;
-}
-
-export class KitStore {
-  readonly network: Network;
+/** The crash-safe directory of the file comment, `<dataDir>/<network>/`: what openStore({ dataDir }) opens. */
+export class FileBackend implements StoreBackend {
   /** `<dataDir>/<network>`. */
-  readonly dir: string;
-  readonly sealed: boolean;
+  readonly where: string;
   readonly #dataDir: string;
-  readonly #key: Buffer | null;
-  readonly #log: LogFn;
-  readonly #now: () => number;
+  readonly #network: Network;
   readonly #hooks: StoreHooks;
   readonly #nonce = randomBytes(16).toString('hex');
-  #closed = false;
+  #log: LogFn = () => {};
   #held = false;
   /** The store directory's real path: this process's key for its lock (HELD_LOCKS). */
   #lockKey: string;
-  readonly #queues = new Map<string, Promise<unknown>>();
 
-  /** Use openStore(). */
-  constructor(o: OpenStoreOptions, key: Buffer | null) {
-    this.network = o.network;
+  constructor(o: { dataDir: string; network: Network; hooks?: StoreHooks }) {
     this.#dataDir = o.dataDir;
-    this.dir = join(o.dataDir, o.network);
-    this.#lockKey = this.dir;
-    this.#key = key;
-    this.sealed = !!key;
-    this.#log = redactedLog(o.log);
-    this.#now = o.now ?? Date.now;
+    this.#network = o.network;
+    this.where = join(o.dataDir, o.network);
+    this.#lockKey = this.where;
     this.#hooks = o.hooks ?? {};
   }
 
-  // ── Opening, the lock, closing ──────────────────────────────────────────
-
-  /** @internal Creates the directories, takes the lock, checks the key, cleans up after a crash. */
-  async init(): Promise<void> {
+  /** Creates the directories, takes the lock, cleans up after a crash. */
+  async open(o: { log: LogFn }): Promise<void> {
+    this.#log = o.log;
     await this.#ensureDir(this.#dataDir, false);
-    await this.#ensureDir(this.dir, true);
-    this.#lockKey = await realpath(this.dir);
+    await this.#ensureDir(this.where, true);
+    this.#lockKey = await realpath(this.where);
     await this.#acquireLock();
     try {
-      for (const k of STORE_KINDS) await this.#ensureDir(join(this.dir, k), true);
-      await this.#checkMeta();
+      for (const k of STORE_KINDS) await this.#ensureDir(join(this.where, k), true);
       await this.#sweep();
     } catch (e) {
       await this.close();
@@ -435,7 +462,7 @@ export class KitStore {
   }
 
   async #readLock(): Promise<{ info: LockInfo | null; mtimeMs: number } | null> {
-    const file = join(this.dir, LOCK_FILE);
+    const file = join(this.where, LOCK_FILE);
     let text: string;
     let mtimeMs: number;
     try {
@@ -454,13 +481,13 @@ export class KitStore {
   }
 
   async #acquireLock(): Promise<void> {
-    const file = join(this.dir, LOCK_FILE);
+    const file = join(this.where, LOCK_FILE);
     // startedAt is wall-clock time (never the injected test clock): it is compared with this process's start.
     const mine: LockInfo = { pid: process.pid, host: hostname(), startedAt: Date.now(), nonce: this.#nonce };
     for (let attempt = 0; attempt < 5; attempt++) {
       if (await this.#publishNew(file, JSON.stringify(mine) + '\n', false)) {
         const back = await this.#readLock();
-        if (back?.info?.nonce !== this.#nonce) throw new SafetyError(SAFETY.STORE_LOCK_LOST, `The lock of ${this.dir} changed while it was being taken.`);
+        if (back?.info?.nonce !== this.#nonce) throw new SafetyError(SAFETY.STORE_LOCK_LOST, `The lock of ${this.where} changed while it was being taken.`);
         this.#held = true;
         HELD_LOCKS.add(this.#lockKey);
         return;
@@ -472,139 +499,95 @@ export class KitStore {
         const i = held.info;
         const since = new Date(i.startedAt).toISOString();
         if (i.host !== hostname()) {
-          throw new SafetyError(SAFETY.STORE_LOCKED, `${this.dir} is in use by process ${i.pid} on ${i.host} (since ${since}). One bot per data directory; if that process is gone, delete ${file}.`);
+          throw new SafetyError(SAFETY.STORE_LOCKED, `${this.where} is in use by process ${i.pid} on ${i.host} (since ${since}). One bot per data directory; if that process is gone, delete ${file}.`);
         }
         if (i.pid === process.pid) {
           // This process's own id: a store this process still has open, or a lock left by an earlier run that
           // had the same id (a restarted container or service often runs the bot under the same pid again).
           if (HELD_LOCKS.has(this.#lockKey) || i.startedAt >= processStartMs() - PID_START_SLACK_MS) {
-            throw new SafetyError(SAFETY.STORE_LOCKED, `${this.dir} is in use by process ${i.pid}, this one (since ${since}): it is already open here. One store per data directory; close the other one first.`);
+            throw new SafetyError(SAFETY.STORE_LOCKED, `${this.where} is in use by process ${i.pid}, this one (since ${since}): it is already open here. One store per data directory; close the other one first.`);
           }
-          takeover = `an earlier run with this same process id ${i.pid} (started ${since}) held ${this.dir} and has ended; taking over its lock`;
+          takeover = `an earlier run with this same process id ${i.pid} (started ${since}) held ${this.where} and has ended; taking over its lock`;
         } else if (pidAlive(i.pid)) {
-          throw new SafetyError(SAFETY.STORE_LOCKED, `${this.dir} is in use by process ${i.pid} (since ${since}). One bot per data directory; if that process is not this kit, delete ${file}.`);
+          throw new SafetyError(SAFETY.STORE_LOCKED, `${this.where} is in use by process ${i.pid} (since ${since}). One bot per data directory; if that process is not this kit, delete ${file}.`);
         } else {
-          takeover = `process ${i.pid} (started ${since}) held ${this.dir} and is no longer running; taking over its lock`;
+          takeover = `process ${i.pid} (started ${since}) held ${this.where} and is no longer running; taking over its lock`;
         }
       } else {
         if (Date.now() - held.mtimeMs < LOCK_UNREADABLE_GRACE_MS) {
-          throw new SafetyError(SAFETY.STORE_LOCKED, `${this.dir} is being opened by another process right now; try again in a few seconds.`);
+          throw new SafetyError(SAFETY.STORE_LOCKED, `${this.where} is being opened by another process right now; try again in a few seconds.`);
         }
-        takeover = `the lock file of ${this.dir} cannot be read (a crash while it was written); taking it over`;
+        takeover = `the lock file of ${this.where} cannot be read (a crash while it was written); taking it over`;
       }
       // Remove only the lock judged stale: when another process replaced it meanwhile, judge again.
       const again = await this.#readLock();
       if (!again) continue;
       const same = held.info ? again.info?.nonce === held.info.nonce : !again.info && again.mtimeMs === held.mtimeMs;
       if (!same) continue;
-      this.#log(`[store] ${this.network}: ${takeover}`);
+      this.#log(`[store] ${this.#network}: ${takeover}`);
       try {
         await unlink(file);
-        await fsyncDir(this.dir);
+        await fsyncDir(this.where);
       } catch (e) {
         if (errCode(e) !== 'ENOENT') throw e;
       }
     }
-    throw new SafetyError(SAFETY.STORE_LOCKED, `Could not take the lock of ${this.dir}.`);
+    throw new SafetyError(SAFETY.STORE_LOCKED, `Could not take the lock of ${this.where}.`);
   }
 
-  /** Throws unless this store still holds its lock (checked before every write). */
-  async assertLock(): Promise<void> {
-    if (this.#closed) throw new SafetyError(SAFETY.STORE_CLOSED, `The store of ${this.dir} is closed.`);
+  async assertHeld(): Promise<void> {
     const held = await this.#readLock();
     if (!this.#held || held?.info?.nonce !== this.#nonce || held.info.pid !== process.pid) {
       if (this.#held) HELD_LOCKS.delete(this.#lockKey);
       this.#held = false;
-      throw new SafetyError(SAFETY.STORE_LOCK_LOST, `This process no longer holds the lock of ${this.dir}: another process may be using it. Nothing more is written.`);
+      throw new SafetyError(SAFETY.STORE_LOCK_LOST, `This process no longer holds the lock of ${this.where}: another process may be using it. Nothing more is written.`);
     }
   }
 
-  /** Release the lock (only when it is still this store's). Later calls throw STORE_CLOSED. */
   async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
     if (!this.#held) return;
     this.#held = false;
     HELD_LOCKS.delete(this.#lockKey);
     try {
       const held = await this.#readLock();
       if (held?.info?.nonce === this.#nonce) {
-        await unlink(join(this.dir, LOCK_FILE));
-        await fsyncDir(this.dir);
+        await unlink(join(this.where, LOCK_FILE));
+        await fsyncDir(this.where);
       }
     } catch { /* the lock of a dead process is taken over at the next start */ }
   }
 
-  async #checkMeta(): Promise<void> {
-    const file = join(this.dir, META_FILE);
-    let meta: Record<string, unknown> | null = null;
-    try {
-      meta = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-    } catch (e) {
-      if (errCode(e) !== 'ENOENT') throw new SafetyError(SAFETY.STORE_CORRUPT, `${file} cannot be read.`);
-    }
-    if (meta && (meta.v !== 1 || meta.network !== this.network)) throw new SafetyError(SAFETY.STORE_CORRUPT, `${file} is not this store's (${this.network}).`);
-    const check = meta?.sealCheck;
-    if (check !== undefined) {
-      if (!this.#key) throw new SafetyError(SAFETY.STORE_KEY, `${this.dir} is sealed: set KIT_STORE_KEY_FILE to the key it was sealed with.`);
-      let ok = false;
-      try { ok = isSealed(check) && this.#unseal(check, META_FILE).toString('utf8') === SEAL_CHECK_TEXT; } catch { ok = false; }
-      if (!ok) throw new SafetyError(SAFETY.STORE_KEY, `KIT_STORE_KEY_FILE is not the key ${this.dir} was sealed with.`);
-      return;
-    }
-    if (meta && !this.#key) return;
-    const next: Record<string, unknown> = { v: 1, network: this.network, createdAt: (meta?.createdAt as number) ?? this.#now() };
-    if (this.#key) {
-      next.sealCheck = this.#seal(Buffer.from(SEAL_CHECK_TEXT, 'utf8'), META_FILE);
-      if (meta) this.#log(`[store] ${this.network}: sealing tokens and secrets from now on (KIT_STORE_KEY_FILE); files written before stay readable: offers and trades are sealed when next written, while kept secrets and pending entries (never rewritten) stay unsealed until removed`);
-    }
-    const text = JSON.stringify(next, null, 2) + '\n';
-    await this.assertLock();
-    await this.#publishReplace(file, text, false);
-    if ((await readFile(file, 'utf8')) !== text) throw new SafetyError(SAFETY.STORE_READBACK, `${file} did not read back as written.`);
-  }
-
   /** Remove temp files a crash left behind and make every file private again. */
   async #sweep(): Promise<void> {
-    for (const name of await readdir(this.dir)) {
+    for (const name of await readdir(this.where)) {
       if (TMP_RE.test(name)) {
         // Another process that is opening this folder right now writes its own .lock temp file here: leave a live one's.
         const pid = Number(/\.tmp\.(\d+)\./.exec(name)?.[1]);
         if (pid !== process.pid && pidAlive(pid)) continue;
-        await rm(join(this.dir, name), { force: true });
-        this.#log(`[store] ${this.network}: removed ${name}, left by an interrupted write`);
+        await rm(join(this.where, name), { force: true });
+        this.#log(`[store] ${this.#network}: removed ${name}, left by an interrupted write`);
       }
     }
     for (const k of STORE_KINDS) {
-      const dir = join(this.dir, k);
+      const dir = join(this.where, k);
       for (const name of await readdir(dir)) {
         const file = join(dir, name);
         if (TMP_RE.test(name)) {
           await rm(file, { force: true });
-          this.#log(`[store] ${this.network}: removed ${k}/${name}, left by an interrupted write (the file it was for is unchanged)`);
+          this.#log(`[store] ${this.#network}: removed ${k}/${name}, left by an interrupted write (the file it was for is unchanged)`);
           continue;
         }
         const st = await stat(file);
         if (st.isFile() && (st.mode & 0o077) !== 0) {
           await chmod(file, 0o600);
-          this.#log(`[store] ${this.network}: ${k}/${name} was readable by others; set to 0600`);
+          this.#log(`[store] ${this.#network}: ${k}/${name} was readable by others; set to 0600`);
         }
       }
     }
-    await fsyncDir(this.dir);
+    await fsyncDir(this.where);
   }
 
   // ── Low-level writes ───────────────────────────────────────────────────────
-
-  /** Run `fn` after every earlier queued call for `key` (one writer per file inside this process). */
-  #serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this.#queues.get(key) ?? Promise.resolve();
-    const run = prev.then(fn, fn);
-    const tail = run.catch(() => {});
-    this.#queues.set(key, tail);
-    void tail.then(() => { if (this.#queues.get(key) === tail) this.#queues.delete(key); });
-    return run;
-  }
 
   /** Steps 1-4 for a file that may be replaced. */
   async #publishReplace(file: string, text: string, hooks = true): Promise<void> {
@@ -649,6 +632,203 @@ export class KitStore {
     return true;
   }
 
+  // ── The records' files ─────────────────────────────────────────────────────
+
+  async readMeta(): Promise<string | null> {
+    try {
+      return await readFile(join(this.where, META_FILE), 'utf8');
+    } catch (e) {
+      if (errCode(e) === 'ENOENT') return null;
+      throw e;
+    }
+  }
+
+  async writeMeta(text: string): Promise<void> {
+    await this.#publishReplace(join(this.where, META_FILE), text, false);
+  }
+
+  pathOf(kind: StoreKind, name: string): string {
+    return join(this.where, kind, `${name}.json`);
+  }
+
+  async read(kind: StoreKind, name: string): Promise<string | null> {
+    try {
+      return await readFile(this.pathOf(kind, name), 'utf8');
+    } catch (e) {
+      if (errCode(e) === 'ENOENT') return null;
+      throw e;
+    }
+  }
+
+  async write(kind: StoreKind, name: string, text: string): Promise<void> {
+    await this.#publishReplace(this.pathOf(kind, name), text);
+  }
+
+  writeNew(kind: StoreKind, name: string, text: string): Promise<boolean> {
+    return this.#publishNew(this.pathOf(kind, name), text);
+  }
+
+  async remove(kind: StoreKind, name: string): Promise<boolean> {
+    try {
+      await unlink(this.pathOf(kind, name));
+    } catch (e) {
+      if (errCode(e) === 'ENOENT') return false;
+      throw e;
+    }
+    await fsyncDir(join(this.where, kind));
+    return true;
+  }
+
+  async names(kind: StoreKind): Promise<string[]> {
+    const out: string[] = [];
+    for (const n of await readdir(join(this.where, kind))) if (n.endsWith('.json') && !TMP_RE.test(n)) out.push(n.slice(0, -5));
+    return out;
+  }
+}
+
+// ── The store key ───────────────────────────────────────────────────────────
+
+/** 32 key bytes from key material: 32 raw bytes, or 64 hex digits (spaces around allowed); null when it is neither. */
+function keyBytesOf(m: Uint8Array | string): Buffer | null {
+  if (typeof m !== 'string' && m.length === 32) return Buffer.from(m);
+  const text = (typeof m === 'string' ? m : Buffer.from(m).toString('utf8')).trim();
+  return /^[0-9a-fA-F]{64}$/.test(text) ? Buffer.from(text, 'hex') : null;
+}
+
+/** A 32-byte store key from a key file: 32 raw bytes, or 64 hex digits (spaces around allowed). */
+async function loadStoreKey(file: string): Promise<Buffer> {
+  const buf = await readSecretFile(file, 'store key (KIT_STORE_KEY_FILE)');
+  try {
+    const key = keyBytesOf(buf);
+    if (key) return key;
+    throw new SafetyError(SAFETY.STORE_KEY, `The store key file ${file} must hold exactly 32 bytes (raw, or as 64 hex digits).`);
+  } finally {
+    buf.fill(0);
+  }
+}
+
+/** A 32-byte store key given as itself (a host's secret): 32 raw bytes, or 64 hex digits. */
+function storeKeyOf(m: unknown): Buffer {
+  const key = typeof m === 'string' || m instanceof Uint8Array ? keyBytesOf(m) : null;
+  if (!key) throw new SafetyError(SAFETY.STORE_KEY, 'The store key must be exactly 32 bytes (raw, or as 64 hex digits).');
+  return key;
+}
+
+interface Sealed { sealed: 'aes-256-gcm'; v: 1; iv: string; tag: string; data: string }
+
+const isSealed = (o: unknown): o is Sealed => !!o && typeof o === 'object' && (o as Sealed).sealed === 'aes-256-gcm' && (o as Sealed).v === 1;
+
+/** Opens a store; see the file comment. */
+export async function openStore(o: OpenStoreOptions): Promise<KitStore> {
+  if (!isNet(o.network)) throw new SafetyError(SAFETY.NETWORK_OFF, 'The network is devnet or mainnet.');
+  if (o.backend !== undefined && o.dataDir !== undefined) throw new SafetyError(SAFETY.STORE_CORRUPT, 'Give a data directory or a store backend, not both.');
+  if (o.backend === undefined && (typeof o.dataDir !== 'string' || !o.dataDir)) throw new SafetyError(SAFETY.STORE_CORRUPT, 'No data directory was given.');
+  if (o.key !== undefined && o.keyFile !== undefined) throw new SafetyError(SAFETY.STORE_KEY, 'Give the store key or its key file, not both.');
+  let key: Buffer | null;
+  if (o.key !== undefined) {
+    key = o.key === null ? null : storeKeyOf(o.key);
+  } else {
+    const env = o.env ?? process.env;
+    const keyFile = o.keyFile === undefined ? (env.KIT_STORE_KEY_FILE || null) : o.keyFile;
+    key = keyFile ? await loadStoreKey(keyFile) : null;
+  }
+  const backend = o.backend ?? new FileBackend({ dataDir: o.dataDir!, network: o.network, ...(o.hooks ? { hooks: o.hooks } : {}) });
+  const store = new KitStore(backend, o, key);
+  await store.init();
+  return store;
+}
+
+export class KitStore {
+  readonly network: Network;
+  /** Where the store is: `<dataDir>/<network>` on files, a host's name for its database on another backend. */
+  readonly dir: string;
+  readonly sealed: boolean;
+  readonly #backend: StoreBackend;
+  readonly #key: Buffer | null;
+  readonly #log: LogFn;
+  readonly #now: () => number;
+  #closed = false;
+  readonly #queues = new Map<string, Promise<unknown>>();
+
+  /** Use openStore(). */
+  constructor(backend: StoreBackend, o: { network: Network; log?: LogFn; now?: () => number }, key: Buffer | null) {
+    this.network = o.network;
+    this.#backend = backend;
+    this.dir = backend.where;
+    this.#key = key;
+    this.sealed = !!key;
+    this.#log = redactedLog(o.log);
+    this.#now = o.now ?? Date.now;
+  }
+
+  // ── Opening, the lock, closing ──────────────────────────────────────────
+
+  /** @internal Takes the lock and gets the backend ready (a crash's leftovers cleared), then checks the key. */
+  async init(): Promise<void> {
+    await this.#backend.open({ log: this.#log });
+    try {
+      await this.#checkMeta();
+    } catch (e) {
+      await this.close();
+      throw e;
+    }
+  }
+
+  /** Throws unless this store still holds its lock (checked before every write). */
+  async assertLock(): Promise<void> {
+    if (this.#closed) throw new SafetyError(SAFETY.STORE_CLOSED, `The store of ${this.dir} is closed.`);
+    await this.#backend.assertHeld();
+  }
+
+  /** Release the lock (only when it is still this store's). Later calls throw STORE_CLOSED. */
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    await this.#backend.close();
+  }
+
+  async #checkMeta(): Promise<void> {
+    const file = join(this.dir, META_FILE);
+    let meta: Record<string, unknown> | null = null;
+    try {
+      const text = await this.#backend.readMeta();
+      if (text !== null) meta = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new SafetyError(SAFETY.STORE_CORRUPT, `${file} cannot be read.`);
+    }
+    if (meta && (meta.v !== 1 || meta.network !== this.network)) throw new SafetyError(SAFETY.STORE_CORRUPT, `${file} is not this store's (${this.network}).`);
+    const check = meta?.sealCheck;
+    if (check !== undefined) {
+      if (!this.#key) throw new SafetyError(SAFETY.STORE_KEY, `${this.dir} is sealed: set KIT_STORE_KEY_FILE to the key it was sealed with.`);
+      let ok = false;
+      try { ok = isSealed(check) && this.#unseal(check, META_FILE).toString('utf8') === SEAL_CHECK_TEXT; } catch { ok = false; }
+      if (!ok) throw new SafetyError(SAFETY.STORE_KEY, `KIT_STORE_KEY_FILE is not the key ${this.dir} was sealed with.`);
+      return;
+    }
+    if (meta && !this.#key) return;
+    const next: Record<string, unknown> = { v: 1, network: this.network, createdAt: (meta?.createdAt as number) ?? this.#now() };
+    if (this.#key) {
+      next.sealCheck = this.#seal(Buffer.from(SEAL_CHECK_TEXT, 'utf8'), META_FILE);
+      if (meta) this.#log(`[store] ${this.network}: sealing tokens and secrets from now on (KIT_STORE_KEY_FILE); files written before stay readable: offers and trades are sealed when next written, while kept secrets and pending entries (never rewritten) stay unsealed until removed`);
+    }
+    const text = JSON.stringify(next, null, 2) + '\n';
+    await this.assertLock();
+    await this.#backend.writeMeta(text);
+    if ((await this.#backend.readMeta()) !== text) throw new SafetyError(SAFETY.STORE_READBACK, `${file} did not read back as written.`);
+  }
+
+  // ── Low-level writes ───────────────────────────────────────────────────────
+
+  /** Run `fn` after every earlier queued call for `key` (one writer per record inside this process). */
+  #serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.#queues.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => {});
+    this.#queues.set(key, tail);
+    void tail.then(() => { if (this.#queues.get(key) === tail) this.#queues.delete(key); });
+    return run;
+  }
+
   #aad(rel: string): Buffer {
     return Buffer.from(`saturn-p2p-bot-kit|v1|${this.network}|${rel}`, 'utf8');
   }
@@ -675,18 +855,14 @@ export class KitStore {
     return Buffer.concat([d.update(Buffer.from(s.data, 'base64')), d.final()]);
   }
 
-  #path(kind: StoreKind, name: string): string {
-    return join(this.dir, kind, `${name}.json`);
-  }
-
-  /** A record as file text (sealed for the token and secret kinds when a key is set). */
+  /** A record as its stored text (sealed for the token and secret kinds when a key is set). */
   #encode(kind: StoreKind, name: string, value: unknown): string {
     const plain = JSON.stringify(value, null, 2) + '\n';
     if (!this.#key || !SEALED_KINDS.has(kind)) return plain;
     return JSON.stringify(this.#seal(Buffer.from(plain, 'utf8'), `${kind}/${name}.json`)) + '\n';
   }
 
-  /** File text -> the record's JSON value; STORE_CORRUPT (or STORE_KEY) when it cannot be read. */
+  /** Stored text -> the record's JSON value; STORE_CORRUPT (or STORE_KEY) when it cannot be read. */
   #decode(kind: StoreKind, name: string, text: string): unknown {
     const rel = `${kind}/${name}.json`;
     let o: unknown;
@@ -711,25 +887,22 @@ export class KitStore {
   }
 
   async #read(kind: StoreKind, name: string): Promise<unknown | null> {
-    let text: string;
+    let text: string | null;
     try {
-      text = await readFile(this.#path(kind, name), 'utf8');
+      text = await this.#backend.read(kind, name);
     } catch (e) {
-      if (errCode(e) === 'ENOENT') return null;
       throw new SafetyError(SAFETY.STORE_CORRUPT, `${kind}/${name}.json in ${this.dir} cannot be read (${errCode(e) ?? 'error'}).`);
     }
-    return this.#decode(kind, name, text);
+    return text === null ? null : this.#decode(kind, name, text);
   }
 
-  /** Step 5: the file reads back exactly as written, and as the value meant. */
+  /** Step 5: the record reads back exactly as written, and as the value meant. */
   async #verify(kind: StoreKind, name: string, text: string, value: unknown): Promise<void> {
-    const file = this.#path(kind, name);
-    let back: string;
+    let back: string | null = null;
     try {
-      back = await readFile(file, 'utf8');
-    } catch {
-      throw new SafetyError(SAFETY.STORE_READBACK, `${kind}/${name}.json in ${this.dir} could not be read back after it was written.`);
-    }
+      back = await this.#backend.read(kind, name);
+    } catch { /* reported below */ }
+    if (back === null) throw new SafetyError(SAFETY.STORE_READBACK, `${kind}/${name}.json in ${this.dir} could not be read back after it was written.`);
     if (back !== text) throw new SafetyError(SAFETY.STORE_READBACK, `${kind}/${name}.json in ${this.dir} did not read back as written.`);
     const decoded = this.#decode(kind, name, back);
     if (!isDeepStrictEqual(decoded, JSON.parse(JSON.stringify(value)))) throw new SafetyError(SAFETY.STORE_READBACK, `${kind}/${name}.json in ${this.dir} did not read back as the record written.`);
@@ -739,35 +912,26 @@ export class KitStore {
   async #put(kind: StoreKind, name: string, value: unknown): Promise<void> {
     await this.assertLock();
     const text = this.#encode(kind, name, value);
-    await this.#publishReplace(this.#path(kind, name), text);
+    await this.#backend.write(kind, name, text);
     await this.#verify(kind, name, text, value);
   }
 
-  /** Write only when absent and read back. False (nothing written) when the file exists. */
+  /** Write only when absent and read back. False (nothing written) when the record exists. */
   async #putNew(kind: StoreKind, name: string, value: unknown): Promise<boolean> {
     await this.assertLock();
     const text = this.#encode(kind, name, value);
-    if (!(await this.#publishNew(this.#path(kind, name), text))) return false;
+    if (!(await this.#backend.writeNew(kind, name, text))) return false;
     await this.#verify(kind, name, text, value);
     return true;
   }
 
   async #remove(kind: StoreKind, name: string): Promise<boolean> {
     await this.assertLock();
-    try {
-      await unlink(this.#path(kind, name));
-    } catch (e) {
-      if (errCode(e) === 'ENOENT') return false;
-      throw e;
-    }
-    await fsyncDir(join(this.dir, kind));
-    return true;
+    return this.#backend.remove(kind, name);
   }
 
-  async #names(kind: StoreKind): Promise<string[]> {
-    const out: string[] = [];
-    for (const n of await readdir(join(this.dir, kind))) if (n.endsWith('.json') && !TMP_RE.test(n)) out.push(n.slice(0, -5));
-    return out;
+  #names(kind: StoreKind): Promise<string[]> {
+    return this.#backend.names(kind);
   }
 
   #corrupt(kind: StoreKind, name: string, why: string): SafetyError {
@@ -1143,7 +1307,7 @@ export class KitStore {
 
   /** The path of a record's file, for messages and tests. */
   fileOf(kind: StoreKind, name: string | number): string {
-    return this.#path(kind, basename(String(name)));
+    return this.#backend.pathOf(kind, basename(String(name)));
   }
 }
 

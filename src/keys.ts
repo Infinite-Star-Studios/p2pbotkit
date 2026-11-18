@@ -3,6 +3,11 @@
  * two key files only, never from the command line, an environment variable
  * or a URL; addresses derived and logged, keys never logged.
  *
+ * A host with no file system of its own (a Cloudflare Durable Object,
+ * cloudflare/) gives the same two files' JSON text from its own secret store
+ * instead (loadKeys({ secrets })): the text is checked exactly as a key
+ * file's content is, and named by its secret's name in errors, never quoted.
+ *
  *   - Phantasma: a JSON file {"wif": "<WIF>"}; the WIF's checksum is verified
  *     before use (a typo would otherwise make another, unfunded key).
  *   - Base: a JSON file {"privateKey": "0x<64 hex>"}.
@@ -60,15 +65,22 @@ export async function readSecretFile(path: string, what: string): Promise<Buffer
   }
 }
 
+/** Where a key's JSON came from, for messages: a key file, or a host's secret (by name; never its content). */
+type KeySource = { file: string } | { secret: string };
+/** "file <path>" or "secret <name>", after the key's name. */
+const sourceOf = (s: KeySource) => ('file' in s ? `file ${s.file}` : `secret ${s.secret}`);
+/** "<path>" or "the secret <name>", after "in". */
+const placeOf = (s: KeySource) => ('file' in s ? s.file : `the secret ${s.secret}`);
+
 /** Parse a key file's JSON; the error never quotes the content. */
-function parseKeyJson(buf: Buffer, path: string, what: string): Record<string, unknown> {
+function parseKeyJson(buf: Buffer, src: KeySource, what: string): Record<string, unknown> {
   let o: unknown;
   try {
     o = JSON.parse(buf.toString('utf8'));
   } catch {
-    throw new SafetyError(SAFETY.KEY_FILE, `The ${what} file ${path} is not JSON.`);
+    throw new SafetyError(SAFETY.KEY_FILE, `The ${what} ${sourceOf(src)} is not JSON.`);
   }
-  if (!o || typeof o !== 'object' || Array.isArray(o)) throw new SafetyError(SAFETY.KEY_FILE, `The ${what} file ${path} is not a JSON object.`);
+  if (!o || typeof o !== 'object' || Array.isArray(o)) throw new SafetyError(SAFETY.KEY_FILE, `The ${what} ${sourceOf(src)} is not a JSON object.`);
   return o as Record<string, unknown>;
 }
 
@@ -120,12 +132,28 @@ export interface LoadedKeys {
   readonly base: PrivateKeyAccount;
 }
 
+/**
+ * The two key files' JSON text, for a host that keeps them in a secret store
+ * of its own (a Cloudflare Worker secret) rather than in files: exactly the
+ * files' content, {"wif": "..."} and {"privateKey": "0x..."}.
+ */
+export interface KeySecrets {
+  /** The Phantasma key file's JSON text. */
+  readonly pha: string;
+  /** The Base key file's JSON text. */
+  readonly base: string;
+  /** The secrets' names, for messages (default PHA_KEY and BASE_KEY). */
+  readonly names?: { readonly pha?: string; readonly base?: string };
+}
+
 export interface LoadKeysOptions {
   network: Network;
-  /** JSON {"wif": "..."}, mode 0600. */
-  phaKeyFile: string;
+  /** JSON {"wif": "..."}, mode 0600. Give the two files or `secrets`. */
+  phaKeyFile?: string;
   /** JSON {"privateKey": "0x..."}, mode 0600. */
-  baseKeyFile: string;
+  baseKeyFile?: string;
+  /** The two files' JSON text from a host's secret store, instead of the files (KeySecrets). */
+  secrets?: KeySecrets;
   /** Checked for the loaded key material (default: process.argv and process.execArgv). */
   argv?: readonly string[];
   /**
@@ -178,39 +206,37 @@ export function knownRoleProblem(addr: { pha?: string; base?: string }, forbid: 
   return null;
 }
 
-/** The Phantasma key from its file. */
-async function loadPhaKey(path: string): Promise<{ keys: PhantasmaKeys; material: string }> {
-  const buf = await readSecretFile(path, 'Phantasma key');
+/** The Phantasma key from its file's JSON (zeroed after). */
+function phaKeyOf(buf: Buffer, src: KeySource): { keys: PhantasmaKeys; material: string } {
   try {
-    const o = parseKeyJson(buf, path, 'Phantasma key');
+    const o = parseKeyJson(buf, src, 'Phantasma key');
     const wif = typeof o.wif === 'string' ? o.wif.trim() : '';
-    if (!wif) throw new SafetyError(SAFETY.KEY_FILE, `The Phantasma key file ${path} has no "wif" field.`);
-    if (!wifOk(wif)) throw new SafetyError(SAFETY.KEY_FILE, `The "wif" in ${path} is not a valid Phantasma WIF (its checksum or shape is wrong).`);
+    if (!wif) throw new SafetyError(SAFETY.KEY_FILE, `The Phantasma key ${sourceOf(src)} has no "wif" field.`);
+    if (!wifOk(wif)) throw new SafetyError(SAFETY.KEY_FILE, `The "wif" in ${placeOf(src)} is not a valid Phantasma WIF (its checksum or shape is wrong).`);
     let keys: PhantasmaKeys;
     try {
       keys = PhantasmaKeys.fromWIF(wif);
     } catch {
-      throw new SafetyError(SAFETY.KEY_FILE, `The "wif" in ${path} could not be read as a Phantasma key.`);
+      throw new SafetyError(SAFETY.KEY_FILE, `The "wif" in ${placeOf(src)} could not be read as a Phantasma key.`);
     }
-    if (!/^P2K[1-9A-HJ-NP-Za-km-z]{40,50}$/.test(keys.Address.Text)) throw new SafetyError(SAFETY.KEY_FILE, `The key in ${path} does not give a Phantasma user address.`);
+    if (!/^P2K[1-9A-HJ-NP-Za-km-z]{40,50}$/.test(keys.Address.Text)) throw new SafetyError(SAFETY.KEY_FILE, `The key in ${placeOf(src)} does not give a Phantasma user address.`);
     return { keys, material: wif };
   } finally {
     buf.fill(0);
   }
 }
 
-/** The Base account from its file. */
-async function loadBaseKey(path: string): Promise<{ account: PrivateKeyAccount; material: string }> {
-  const buf = await readSecretFile(path, 'Base key');
+/** The Base account from its file's JSON (zeroed after). */
+function baseKeyOf(buf: Buffer, src: KeySource): { account: PrivateKeyAccount; material: string } {
   try {
-    const o = parseKeyJson(buf, path, 'Base key');
+    const o = parseKeyJson(buf, src, 'Base key');
     const pk = typeof o.privateKey === 'string' ? o.privateKey.trim() : '';
-    if (!/^0x[0-9a-fA-F]{64}$/.test(pk)) throw new SafetyError(SAFETY.KEY_FILE, `The Base key file ${path} needs "privateKey": "0x" followed by 64 hex digits.`);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(pk)) throw new SafetyError(SAFETY.KEY_FILE, `The Base key ${sourceOf(src)} needs "privateKey": "0x" followed by 64 hex digits.`);
     let account: PrivateKeyAccount;
     try {
       account = privateKeyToAccount(pk.toLowerCase() as `0x${string}`);
     } catch {
-      throw new SafetyError(SAFETY.KEY_FILE, `The "privateKey" in ${path} is not a valid secp256k1 key.`);
+      throw new SafetyError(SAFETY.KEY_FILE, `The "privateKey" in ${placeOf(src)} is not a valid secp256k1 key.`);
     }
     return { account, material: pk };
   } finally {
@@ -218,17 +244,40 @@ async function loadBaseKey(path: string): Promise<{ account: PrivateKeyAccount; 
   }
 }
 
+/** A secret's text as bytes, held to a key file's size limit. */
+function secretBytes(text: unknown, name: string, what: string): Buffer {
+  if (typeof text !== 'string' || !text.trim()) throw new SafetyError(SAFETY.KEY_FILE, `The ${what} secret ${name} is empty.`);
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length > SECRET_FILE_MAX) {
+    buf.fill(0);
+    throw new SafetyError(SAFETY.KEY_FILE, `The ${what} secret ${name} is larger than a key file can be.`);
+  }
+  return buf;
+}
+
 /**
- * Load both keys from their files (mode 0600), check that neither is on the
- * command line and that neither holds a forbidden role (check 68), and log
- * the two addresses. Throws SafetyError (KEY_FILE, KEY_FILE_MODE, KEY_ARGV,
+ * Load both keys from their files (mode 0600), or from a host's secrets
+ * (their JSON text, KeySecrets), check that neither is on the command line
+ * and that neither holds a forbidden role (check 68), and log the two
+ * addresses. Throws SafetyError (KEY_FILE, KEY_FILE_MODE, KEY_ARGV,
  * KEY_ROLE) without ever quoting a key.
  */
 export async function loadKeys(o: LoadKeysOptions): Promise<LoadedKeys> {
   if (o.network !== 'devnet' && o.network !== 'mainnet') throw new SafetyError(SAFETY.NETWORK_OFF, 'The network is devnet or mainnet.');
   const log = redactedLog(o.log);
-  const pha = await loadPhaKey(o.phaKeyFile);
-  const base = await loadBaseKey(o.baseKeyFile);
+  const files = o.phaKeyFile !== undefined || o.baseKeyFile !== undefined;
+  if (files && o.secrets) throw new SafetyError(SAFETY.KEY_FILE, 'Give the two key files or their secrets, not both.');
+  let pha: { keys: PhantasmaKeys; material: string };
+  let base: { account: PrivateKeyAccount; material: string };
+  if (o.secrets) {
+    const names = { pha: o.secrets.names?.pha ?? 'PHA_KEY', base: o.secrets.names?.base ?? 'BASE_KEY' };
+    pha = phaKeyOf(secretBytes(o.secrets.pha, names.pha, 'Phantasma key'), { secret: names.pha });
+    base = baseKeyOf(secretBytes(o.secrets.base, names.base, 'Base key'), { secret: names.base });
+  } else {
+    if (typeof o.phaKeyFile !== 'string' || typeof o.baseKeyFile !== 'string') throw new SafetyError(SAFETY.KEY_FILE, 'Both key files are needed: phaKeyFile and baseKeyFile.');
+    pha = phaKeyOf(await readSecretFile(o.phaKeyFile, 'Phantasma key'), { file: o.phaKeyFile });
+    base = baseKeyOf(await readSecretFile(o.baseKeyFile, 'Base key'), { file: o.baseKeyFile });
+  }
   const argv = o.argv ?? [...process.argv, ...process.execArgv];
   const onArgv = argvKeyProblem(argv, [pha.material, base.material]);
   if (onArgv) throw new SafetyError(SAFETY.KEY_ARGV, onArgv);

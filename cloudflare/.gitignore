@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+dist/
+# Local secrets for `wrangler dev` (keys, tokens): never commit them.
+.dev.vars*
+# Your control token and store keys (README.md, "Set it up").
+control-token
+*.key
