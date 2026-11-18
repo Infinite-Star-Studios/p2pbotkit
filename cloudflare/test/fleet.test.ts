@@ -50,8 +50,12 @@ class FakeKit {
   running = false;
   policy: Policy | undefined;
   preflightItems: Array<{ name: string; ok: boolean; text: string; code?: string }> = [{ name: 'pins', ok: true, text: 'pinned' }];
+  /** A preflight waits for this (a slow board or chain). */
+  preflightGate: Promise<void> | null = null;
+  /** After its signal aborts, run() takes this long to end: the step in flight finishing (a Base transaction being mined). */
+  windDownMs = 0;
   #next = 1;
-  constructor(readonly clock: () => number, network: 'devnet' | 'mainnet') { this.network = network; }
+  constructor(readonly clock: () => number, network: 'devnet' | 'mainnet', readonly sleep: (ms: number) => Promise<void> = async () => {}) { this.network = network; }
   count(fn: string): number { return this.calls.filter((c) => c.fn === fn).length; }
   #call(fn: string, arg?: unknown) { this.calls.push({ fn, arg, at: this.clock() }); }
   readonly board = {
@@ -67,6 +71,7 @@ class FakeKit {
   readonly base = { readFunds: async () => ({ usdc: 10n ** 12n, allowance: 0n, eth: 10n ** 18n }) };
   async preflight() {
     this.#call('preflight');
+    if (this.preflightGate) await this.preflightGate;
     return { network: this.network, ok: this.preflightItems.every((i) => i.ok), address: this.address, items: this.preflightItems, balances: { pha: null, base: null }, clockSkewS: 0 };
   }
   async postOffer(o: OfferInput): Promise<LocalOffer> {
@@ -92,6 +97,8 @@ class FakeKit {
     this.policy = policy;
     this.running = true;
     await new Promise<void>((r) => { if (!signal || signal.aborted) r(); else signal.addEventListener('abort', () => r(), { once: true }); });
+    if (this.windDownMs > 0) await this.sleep(this.windDownMs);
+    this.#call('ended');
     this.running = false;
   }
   async close() {
@@ -105,14 +112,15 @@ const SELL = { symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08' };
 interface World {
   vt: VTime; fleet: Fleet; host: FleetHost & { alarmAt: number | null; lines: string[] };
   kits: Map<string, FakeKit>; opts: HostedKitOptions[]; failNext: Error[];
+  db: DatabaseSync; kvMap: Map<string, unknown>;
 }
 
-/** A fleet on a fake Durable Object. `bots` is bots.json; `env` its vars and secrets. */
-function world(bots: Record<string, unknown>, env: Record<string, unknown> = {}): World {
-  const vt = new VTime();
-  const db = new DatabaseSync(':memory:');
-  const kv = new Map<string, unknown>();
-  const kits = new Map<string, FakeKit>();
+/** A fleet on a fake Durable Object. `bots` is bots.json; `env` its vars and secrets; `redeployOf`: the same object's storage, after a deploy. */
+function world(bots: Record<string, unknown>, env: Record<string, unknown> = {}, redeployOf?: World): World {
+  const vt = redeployOf?.vt ?? new VTime();
+  const db = redeployOf?.db ?? new DatabaseSync(':memory:');
+  const kv = redeployOf?.kvMap ?? new Map<string, unknown>();
+  const kits = redeployOf?.kits ?? new Map<string, FakeKit>();
   const opts: HostedKitOptions[] = [];
   const failNext: Error[] = [];
   const host = {
@@ -122,7 +130,8 @@ function world(bots: Record<string, unknown>, env: Record<string, unknown> = {})
     kv: {
       get: (k: string) => (kv.has(k) ? structuredClone(kv.get(k)) : undefined),
       put: (k: string, v: unknown) => { kv.set(k, structuredClone(v)); },
-      delete: (k: string) => kv.delete(k)
+      delete: (k: string) => kv.delete(k),
+      keys: (prefix: string) => [...kv.keys()].filter((k) => k.startsWith(prefix)).sort()
     },
     setAlarm(at: number) { this.alarmAt = at; },
     getAlarm() { return this.alarmAt; },
@@ -134,15 +143,16 @@ function world(bots: Record<string, unknown>, env: Record<string, unknown> = {})
       if (failure) throw failure;
       const name = (o.store as unknown as { where: string }).where.replace(/^durable-object:/, '').split('/')[0]!;
       let k = kits.get(name);
-      if (!k) { k = new FakeKit(vt.now, o.network); kits.set(name, k); }
+      if (!k) { k = new FakeKit(vt.now, o.network, (ms) => vt.sleep(ms)); kits.set(name, k); }
       return k as unknown as FleetKit;
     },
     now: vt.now,
     sleep: vt.sleep,
     print(line: string) { this.lines.push(line); }
   };
-  const fleet = new Fleet(host, loadBots(bots, host.env));
-  return { vt, fleet, host, kits, opts, failNext };
+  if (redeployOf) host.alarmAt = redeployOf.host.alarmAt;
+  const fleet = new Fleet(host, loadBots(bots));
+  return { vt, fleet, host, kits, opts, failNext, db, kvMap: kv };
 }
 
 const devnetBot = (o: Record<string, unknown> = {}) => ({ network: 'devnet', offers: [SELL], ...o });
@@ -157,20 +167,28 @@ async function session(w: World, ms = SESSION_MS + 5_000): Promise<void> {
 
 describe('bots.json', () => {
   test('bot names and their configs, each checked as a hosted config; a bad one is kept with its error', () => {
-    const env = { MARKET_API_KEY: 'sat_x' };
-    const ok = loadBots({ market: mainnetBot(), 'dev-seller': devnetBot() }, env);
+    const ok = loadBots({ market: mainnetBot(), 'dev-seller': devnetBot() });
     assert.equal(ok.error, null);
     assert.deepEqual(ok.list.map((b) => [b.name, b.prefix, b.error]), [['market', 'MARKET', null], ['dev-seller', 'DEV_SELLER', null]]);
-    assert.match(loadBots({ Market: devnetBot() }, {}).error!, /not a bot name/);
-    assert.match(loadBots([], {}).error!, /JSON object/);
-    assert.match(loadBots({}, {}).error!, /names no bot/);
-    const bad = loadBots({ market: { ...mainnetBot(), keys: { pha: 'a', base: 'b' } } }, {});
+    assert.match(loadBots({ Market: devnetBot() }).error!, /not a bot name/);
+    assert.match(loadBots([]).error!, /JSON object/);
+    assert.match(loadBots({}).error!, /names no bot/);
+    const bad = loadBots({ market: { ...mainnetBot(), keys: { pha: 'a', base: 'b' } } });
     assert.equal(bad.error, null);
     assert.match(bad.list[0]!.error!, /"keys", which names a file/);
-    // An instant offer needs the bot's API key secret.
+    // Whether a config can be used never depends on the secrets: npm run check-config and the Worker agree.
     const instant = { network: 'devnet', offers: [{ ...SELL, mode: 'instant' }] };
-    assert.match(loadBots({ seller: instant }, {}).list[0]!.error!, /set the secret SELLER_API_KEY/);
-    assert.equal(loadBots({ seller: instant }, { SELLER_API_KEY: 'sat_y' }).list[0]!.error, null);
+    assert.equal(loadBots({ seller: instant }).list[0]!.error, null);
+  });
+
+  test('an instant offer needs the bot\'s API key secret: without it the start is refused, as for a missing key', async () => {
+    const w = world({ seller: { network: 'devnet', offers: [{ ...SELL, mode: 'instant' }] } }, { SELLER_PHA_KEY: '{}', SELLER_BASE_KEY: '{}' });
+    const r = await w.fleet.start('seller');
+    assert.equal(r.status, 409);
+    assert.match(String(r.body.error), /Set the secret SELLER_API_KEY first: an instant offer needs an API key/);
+    assert.match(String((w.fleet.status().body.bots as Array<{ secrets: string }>)[0]!.secrets), /SELLER_API_KEY/);
+    const w2 = world({ seller: { network: 'devnet', offers: [{ ...SELL, mode: 'instant' }] } }, { SELLER_PHA_KEY: '{}', SELLER_BASE_KEY: '{}', SELLER_API_KEY: 'sat_y' });
+    assert.equal((await w2.fleet.start('seller')).status, 200);
   });
 });
 
@@ -398,5 +416,129 @@ describe('the dry run', () => {
     assert.equal(kit.count('postOffer'), 0);
     await w.fleet.start('market');
     assert.equal((await w.fleet.dryRun('market')).status, 409);
+  });
+});
+
+describe('races and redeploys', () => {
+  test('a stop or a halt that comes while a start\'s preflight runs cancels the start: the bot stays stopped, with no alarm', async () => {
+    for (const call of ['halt', 'stop'] as const) {
+      const w = world({ market: mainnetBot() }, { KIT_ALLOW_MAINNET: '1' });
+      const kit = new FakeKit(w.vt.now, 'mainnet');
+      let release!: () => void;
+      kit.preflightGate = new Promise<void>((r) => { release = r; });
+      w.kits.set('market', kit);
+      const starting = w.fleet.start('market', { mainnet: true });
+      await settle();
+      assert.equal(kit.count('preflight'), 1, 'the preflight runs');
+      const r = await w.fleet[call]('market');
+      assert.equal(r.status, 200);
+      assert.match(String(r.body.note), /It was starting: the start is cancelled/);
+      release();
+      const s = await starting;
+      assert.equal(s.status, 409, `${call}: ${JSON.stringify(s.body)}`);
+      assert.match(String(s.body.error), new RegExp(`a ${call} was asked while it was starting`));
+      assert.equal((w.fleet.status().body.bots as Array<{ mode: string }>)[0]!.mode, 'stopped');
+      assert.equal(w.host.alarmAt, null, 'no session will run');
+      assert.equal(kit.count('close'), 1, 'the preflight\'s kit closed');
+      assert.equal((await w.fleet.start('market', { mainnet: true })).status, 200, 'a later start works');
+    }
+  });
+
+  test('a bot whose session has ended goes on in an extra session while another bot still finishes its last step', async () => {
+    const w = world({ seller: devnetBot(), buyer: devnetBot({ offers: [], bids: [SELL] }) },
+      { SELLER_PHA_KEY: '{}', SELLER_BASE_KEY: '{}', BUYER_PHA_KEY: '{}', BUYER_BASE_KEY: '{}' });
+    await w.fleet.start('seller');
+    await w.fleet.start('buyer');
+    const a = w.fleet.alarm();
+    await w.vt.advance(5_000);
+    const slow = w.kits.get('seller')!, quick = w.kits.get('buyer')!;
+    slow.windDownMs = 90_000;
+    assert.equal(quick.count('run'), 1);
+    let done = false;
+    void a.then(() => { done = true; });
+    await w.vt.advance(SESSION_MS + 10_000);
+    assert.equal(slow.running, true, 'the seller still finishes its last step');
+    assert.equal(quick.count('run'), 2, 'the buyer went on in an extra session meanwhile');
+    assert.equal(quick.running, true);
+    await w.vt.advance(90_000);
+    assert.equal(slow.running, false);
+    assert.equal(quick.running, false, 'the extra session ended with the seller\'s');
+    await settle();
+    assert.equal(done, true, 'the alarm is over, with no idle wait for anyone');
+    assert.equal(slow.count('run'), 1, 'one session for the seller');
+    assert.ok(w.host.alarmAt !== null && w.host.alarmAt <= w.vt.now() + NEXT_MS);
+  });
+
+  test('a bot that still has a session never gets a second one (an alarm that came while it ran)', async () => {
+    const w = world({ market: devnetBot() });
+    await w.fleet.start('market');
+    const first = w.fleet.alarm();
+    await w.vt.advance(5_000);
+    const kit = w.kits.get('market')!;
+    assert.equal(kit.running, true);
+    const second = w.fleet.alarm();
+    await w.vt.advance(5_000);
+    await second;
+    assert.equal(kit.count('run'), 1, 'no second session');
+    const st = (w.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!;
+    assert.equal(st.lastError, undefined, 'and no failure (no store lock fought over)');
+    assert.equal(st.sessionRunning, true, 'the first session is still the one stop and halt reach');
+    await w.fleet.halt('market');
+    await w.vt.advance(5_000);
+    await first;
+    assert.equal(kit.running, false);
+  });
+
+  test('a running bot whose entry leaves bots.json stops with the config it last ran with, then needs a new start; it never resumes on its own', async () => {
+    const w = world({ market: mainnetBot() }, { KIT_ALLOW_MAINNET: '1' });
+    assert.equal((await w.fleet.start('market', { mainnet: true })).status, 200);
+    await session(w);
+    const kit = w.kits.get('market')!;
+    assert.equal(kit.count('postOffer'), 1);
+    kit.trades = [{ id: 5, status: 'pha_locked' } as unknown as LocalTrade];
+    // A deploy without it.
+    const w2 = world({ other: devnetBot() }, { KIT_ALLOW_MAINNET: '1', OTHER_PHA_KEY: '{}', OTHER_BASE_KEY: '{}' }, w);
+    const listed = (w2.fleet.status().body.bots as Array<Record<string, unknown>>).find((b) => b.name === 'market')!;
+    assert.equal(listed.mode, 'stopping');
+    assert.equal(listed.orphan, true);
+    assert.match(String(listed.note), /its entry left bots\.json: it stops with the config it last ran with/);
+    assert.equal((await w2.fleet.start('market', { mainnet: true })).status, 409, 'not startable while it is not in bots.json');
+    assert.equal((await w2.fleet.dryRun('market')).status, 409);
+    await session(w2);
+    assert.equal(kit.count('cancelOffer'), 1, 'its offer cancelled');
+    assert.equal(kit.count('postOffer'), 1, 'nothing listed');
+    assert.equal((w2.fleet.status().body.bots as Array<{ name: string; mode: string }>).find((b) => b.name === 'market')!.mode, 'stopping', 'its trade still runs');
+    kit.trades = [{ id: 5, status: 'done', endedAt: w2.vt.now() } as unknown as LocalTrade];
+    await session(w2);
+    const after = (w2.fleet.status().body.bots as Array<Record<string, unknown>>).find((b) => b.name === 'market')!;
+    assert.equal(after.mode, 'stopped');
+    assert.match(String(after.note), /Stopped cleanly after it left bots\.json/);
+    // A deploy that brings it back: it stays stopped until a new start, with its dry run and its yes.
+    const w3 = world({ market: mainnetBot() }, { KIT_ALLOW_MAINNET: '1' }, w2);
+    await w3.fleet.wake();
+    await session(w3);
+    assert.equal(kit.count('run'), 3, 'no session of its own after it came back');
+    assert.equal((w3.fleet.status().body.bots as Array<{ mode: string }>)[0]!.mode, 'stopped');
+    assert.equal((await w3.fleet.start('market', { mainnet: true })).status, 200);
+  });
+
+  test('a running bot whose config can no longer be used stops the same way; one that never ran a session is stopped and says why', async () => {
+    const w = world({ market: devnetBot() });
+    await w.fleet.start('market');
+    await session(w);
+    const w2 = world({ market: { ...devnetBot(), price: 'bad' } }, {}, w);
+    const listed = (w2.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!;
+    assert.equal(listed.mode, 'stopping');
+    assert.match(String(listed.note), /its config in bots\.json cannot be used/);
+    await session(w2);
+    assert.equal((w2.fleet.status().body.bots as Array<{ mode: string }>)[0]!.mode, 'stopped');
+    assert.equal(w2.kits.get('market')!.count('cancelOffer'), 1);
+    // Started, but removed before its first session: no config of it is kept, so it is stopped, and status says so.
+    const v = world({ market: devnetBot() });
+    await v.fleet.start('market');
+    const v2 = world({ other: devnetBot() }, { OTHER_PHA_KEY: '{}', OTHER_BASE_KEY: '{}' }, v);
+    const orphan = (v2.fleet.status().body.bots as Array<Record<string, unknown>>).find((b) => b.name === 'market')!;
+    assert.equal(orphan.mode, 'stopped');
+    assert.match(String(orphan.note), /no config of it is kept/);
   });
 });

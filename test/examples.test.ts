@@ -1657,12 +1657,13 @@ describe('the runner in sessions (a host such as a Cloudflare Durable Object: cl
     const cfg = parseHostedConfig(await hostedSeller(), { apiKey: false });
     const out = sink();
     const saved: number[][] = [];
-    const takeDue = { load: () => saved.at(-1) ?? [], save: (d: readonly number[]) => { saved.push([...d]); } };
+    const takesAtSave: number[] = [];
+    const takeDue = { load: () => saved.at(-1) ?? [], save: (d: readonly number[]) => { saved.push([...d]); takesAtSave.push(kit.count('sellDownTo')); } };
     const end = new AbortController();
     const p = trade(kit as unknown as BotKit, cfg, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: end.signal, takeDue } });
     await until(vt, () => kit.count('sellDownTo') >= 1, 'the first order', { stepMs: 1_000 });
     assert.equal(kit.count('postOffer'), 2);
-    assert.equal(saved.length, 1, 'the order\'s next time is kept for the host');
+    assert.deepEqual(takesAtSave, [0, 1], 'the order\'s next time is kept before the order goes out (a cut never sends it twice), and again after it');
     assert.ok(saved[0]![0]! >= vt.now() + 110_000, 'the next order is due everyS (120 s) later');
     end.abort();
     assert.equal(await drive(vt, p), SESSION_PAUSED);

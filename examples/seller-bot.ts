@@ -965,6 +965,12 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
         }
         for (let i = 0; i < cfg.take.length && !stopping && !runCtl.signal.aborted; i++) {
           if (now() < due[i]!) continue;
+          // A host's session can be cut at any moment (a deploy, an eviction): the order's next time is kept before
+          // the order goes out, so that a cut never sends one order twice.
+          if (session?.takeDue) {
+            due[i] = now() + cfg.take[i]!.everyS * 1000;
+            await session.takeDue.save(due);
+          }
           await runTake(cfg.take[i]!, i);
           due[i] = now() + cfg.take[i]!.everyS * 1000;
           await session?.takeDue?.save(due);

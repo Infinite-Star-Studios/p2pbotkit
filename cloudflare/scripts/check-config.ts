@@ -19,10 +19,8 @@ try {
   console.log(`bots.json cannot be read: ${e instanceof Error ? e.message : String(e)}`);
   process.exit(1);
 }
-// Instant offers need the bot's API key: assume it is set here; the Worker checks it for real.
-const names = raw && typeof raw === 'object' ? Object.keys(raw) : [];
-const env = Object.fromEntries(names.map((n) => [`${n.toUpperCase().replace(/-/g, '_')}_API_KEY`, 'assumed set']));
-const bots = loadBots(raw, env);
+// The Worker checks bots.json the same way: a config's use never depends on the secrets (they are checked at a start).
+const bots = loadBots(raw);
 if (bots.error) {
   console.log(bots.error);
   process.exit(1);

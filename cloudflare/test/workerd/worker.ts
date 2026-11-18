@@ -64,10 +64,12 @@ export class TestFleet extends DurableObject<Env> {
     const s = ctx.storage;
     const vars = { ...(env as unknown as Record<string, unknown>), FAKE_PHA_KEY: '{}', FAKE_BASE_KEY: '{}' };
     this.#fleet = new Fleet({
-      sql: s.sql, kv: s.kv, setAlarm: (at) => s.setAlarm(at), getAlarm: () => s.getAlarm(), deleteAlarm: () => s.deleteAlarm(),
+      sql: s.sql,
+      kv: { get: (k) => s.kv.get(k), put: (k, v) => s.kv.put(k, v), delete: (k) => s.kv.delete(k), keys: (prefix) => [...s.kv.list({ prefix })].map(([k]) => k) },
+      setAlarm: (at) => s.setAlarm(at), getAlarm: () => s.getAlarm(), deleteAlarm: () => s.deleteAlarm(),
       env: vars, makeKit: fakeKit, now: () => Date.now(), sleep, print: (l) => console.log(l),
       timing: { sessionMs: 6_000, deadmanMs: 20_000, nextMs: 300, minJoinMs: 1_000, joinPollMs: 300, backoffMs: 2_000, backoffMaxMs: 8_000 }
-    }, loadBots(BOTS, vars));
+    }, loadBots(BOTS));
   }
   status() { return this.#fleet.status(); }
   logs(name: string, n?: number) { return this.#fleet.logs(name, n); }

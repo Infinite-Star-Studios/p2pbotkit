@@ -21,7 +21,9 @@ refusal are the same.
   A session runs the runner's own trading loop for about 6 minutes; its
   end is a pause, never a stop, and the next session resumes from the
   store. No call can change what a bot trades: that is `bots.json`,
-  deployed with the Worker.
+  deployed with the Worker. A running bot whose entry leaves `bots.json`
+  (or whose config there breaks) stops with the config it last ran with,
+  and needs a new start to run again.
 - The store keeps its rules in `KitStore` and its records behind a
   `StoreBackend`: `FileBackend` is the data folder of every earlier
   release, unchanged; `SqlBackend` (`src/store-sql.ts`) keeps the same

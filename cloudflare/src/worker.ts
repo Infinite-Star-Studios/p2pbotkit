@@ -36,7 +36,12 @@ export class BotFleet extends DurableObject<Env> {
     const vars = env as unknown as Record<string, unknown>;
     this.#fleet = new Fleet({
       sql: storage.sql,
-      kv: storage.kv,
+      kv: {
+        get: (k) => storage.kv.get(k),
+        put: (k, v) => storage.kv.put(k, v),
+        delete: (k) => storage.kv.delete(k),
+        keys: (prefix) => [...storage.kv.list({ prefix })].map(([k]) => k)
+      },
       setAlarm: (at) => storage.setAlarm(at),
       getAlarm: () => storage.getAlarm(),
       deleteAlarm: () => storage.deleteAlarm(),
@@ -47,7 +52,7 @@ export class BotFleet extends DurableObject<Env> {
       print: (line) => console.log(line),
       // Every request of the kits: never follows a redirect (the runtime has no redirect "error"; fetch.ts).
       fetch: noRedirectFetch(globalThis.fetch.bind(globalThis))
-    }, loadBots(BOTS, vars));
+    }, loadBots(BOTS));
   }
 
   status(): Reply { return this.#fleet.status(); }

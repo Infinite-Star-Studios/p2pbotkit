@@ -108,6 +108,9 @@ All commands run in this folder (`cloudflare/`).
    npx wrangler secret put MARKET_API_KEY
    ```
 
+   The API key is optional, and recommended; a bot that lists an instant
+   offer needs it (its start is refused without it).
+
    The control token, kept in a 0600 file for your own calls:
 
    ```sh
@@ -161,6 +164,9 @@ lines rather than JSON. Replace `<url>` with the Worker's address.
 | `POST <url>/bots/market/stop` | One Ctrl-C: no new offers or takes; it cancels its offers, finishes its trades (on mainnet that can take hours), then stops. |
 | `POST <url>/bots/market/halt` | Two Ctrl-C: it stops at once and cancels nothing. Its offers lapse within 90 s and its trades wait in its store: a stopped bot sends no lock, claim or refund, so a lock it owes and does not send in time is its no-show (3 in 24 hours pause it). Start it again soon. |
 
+A stop or a halt sent while a start's preflight runs cancels that start:
+the bot stays stopped.
+
 The token can start, stop and halt the bots and read their lines; it can
 neither change what they trade nor read a key. If it leaks, put a new one
 in place (`npx wrangler secret put CONTROL_TOKEN`, as in step 3). For a
@@ -181,14 +187,20 @@ address.
   the cause; nothing else needs doing.
 - **More bots:** add their entries to `bots.json` and their secrets; they
   share the one object, and its cost.
+- **A bot that leaves `bots.json`**, or whose config there can no longer be
+  used, is never left with its trades unattended: it stops with the config
+  it last ran with (it cancels its offers and finishes its trades), and
+  `status` says so. It does not run again on its own when its entry comes
+  back: put the entry back, deploy, then dry-run and start it again.
 
 ## Good to know
 
 - **A session's end** waits for the step the bot is in to finish: usually
   seconds, but a Base transaction can take up to 3 minutes to be mined, or
-  twice that with `usePermit: false`. Meanwhile its offers get no heartbeat,
-  and an offer whose heartbeats lapse (90 s) is listed again by the next
-  session.
+  twice that with `usePermit: false`. Meanwhile that bot's offers get no
+  heartbeat, and an offer whose heartbeats lapse (90 s) is listed again by
+  the next session. The fleet's other bots do not wait for it: a bot whose
+  session has ended goes on in a short extra session meanwhile.
 - **A cut session** (a deploy, a Cloudflare runtime update, an eviction) is
   a restart: the object's alarm runs the next session, which takes the
   store's lock over (its log says so), settles every open request and send
