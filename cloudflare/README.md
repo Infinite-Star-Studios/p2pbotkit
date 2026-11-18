@@ -1,7 +1,7 @@
 # The bots on Cloudflare (Durable Objects)
 
 This folder runs the kit's bots on Cloudflare instead of on a machine of
-your own: a laptop, a VPS, or a container host such as Railway. One
+your own: a laptop, a VPS, or a container host. One
 Cloudflare Durable Object runs every bot listed in `bots.json`, with the
 kit's own runner (the loop of `npm run market`), its config format and every
 one of its checks. It needs no server of yours, and costs Cloudflare's
