@@ -27,7 +27,8 @@
     "KIT_ALLOW_MAINNET": "0"
   }
 
-  // Secrets (npx wrangler secret put <NAME>), for each bot of bots.json, by its name in capitals ("market" -> MARKET_...):
+  // Secrets. BOTS_CONFIG, the bots and their configs: npm run deploy uploads your bots.json (never committed) as it.
+  // Then (npx wrangler secret put <NAME>), for each bot of bots.json, by its name in capitals ("market" -> MARKET_...):
   //   MARKET_PHA_KEY     the bot's Phantasma key file, as it is: npx wrangler secret put MARKET_PHA_KEY < keys/mainnet/market-pha.json
   //   MARKET_BASE_KEY    the bot's Base key file, as it is
   //   MARKET_API_KEY     optional, recommended: the bot's API key for the board

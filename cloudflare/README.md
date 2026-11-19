@@ -2,7 +2,7 @@
 
 This folder runs the kit's bots on Cloudflare instead of on a machine of
 your own: a laptop, a VPS, or a container host. One
-Cloudflare Durable Object runs every bot listed in `bots.json`, with the
+Cloudflare Durable Object runs every bot listed in your `bots.json`, with the
 kit's own runner (the loop of `npm run market`), its config format and every
 one of its checks. It needs no server of yours, and costs Cloudflare's
 Workers Paid plan: $5 a month.
@@ -21,7 +21,7 @@ Workers Paid plan: $5 a month.
 | Keys in two 0600 files | The same two files' content in Worker secrets (`MARKET_PHA_KEY`, `MARKET_BASE_KEY`), checked exactly as the files are. |
 | The store in `data/` | The same records, rules and checks in the object's own SQLite. A record is durable before anything the bot sends after it goes out (the object's output gate holds every request until its writes are stored). |
 | A terminal: Ctrl-C, `--dry-run`, the mainnet "yes" | An HTTP control API behind a token: `dry-run`, `start` (on mainnet with `{"mainnet": true}`, your yes), `stop` (one Ctrl-C), `halt` (two). |
-| `market.mainnet.json` | `bots.json`, deployed with the Worker: no call to the control API can change what a bot trades. |
+| `market.mainnet.json` | `bots.json`, a file on your machine only: `npm run deploy` uploads it as the Worker's `BOTS_CONFIG` secret. No call to the control API can change what a bot trades, and your prices and limits never enter the repository. |
 | Long-polls for heartbeats and trades | Plain polls every 5 s. A Worker holds at most six requests waiting for their answers at once, and a held long-poll would make a chain read wait behind it. |
 | Your own IP address | Cloudflare's addresses, shared with other customers: give each bot an API key, so the board counts its limits and its record by the key, not by an address it shares. |
 
@@ -73,20 +73,39 @@ store alone. So a bot moves only once it has nothing running:
 
 All commands run in this folder (`cloudflare/`).
 
-1. **The config.** `bots.json` holds one entry per bot, named in lower case
-   (`market`): the same config as `market.mainnet.json`, without `keys`,
-   `dataDir` and `apiKeyFile`, which name files on a machine
-   (`../examples/README.md`, "The config", explains every field). The file
-   here lists the market bot on mainnet with no offers: add yours, at your
-   own prices. Check it:
+1. **The config.** Make your `bots.json` from the template:
+
+   ```sh
+   cp bots.example.json bots.json
+   ```
+
+   It holds one entry per bot, named in lower case (`market`): the same
+   config as `market.mainnet.json`, without `keys`, `dataDir` and
+   `apiKeyFile`, which name files on a machine (`../examples/README.md`,
+   "The config", explains every field). The template lists the market bot
+   on mainnet with no offers: add yours, at your own prices.
+
+   - **Never commit `bots.json`** (`.gitignore` leaves it out): it holds
+     your prices and your limits, which the board never shows, and the
+     address of your Base RPC.
+   - **On mainnet, give the bot a Base RPC of its own** (`"baseRpc"`, https,
+     from a provider you would trust with the bot's balance). Cloudflare's
+     outbound addresses are shared, and the public Base RPC limits each
+     address: a limited RPC slows every step of a trade, and can hold back
+     a seller's claim. Most providers put your key in the address, which is
+     why the config stays out of the repository.
+
+   Check it:
 
    ```sh
    npm run check-config
    ```
 
-2. **Deploy**, which prints the Worker's address
-   (`https://p2p-bots.<your subdomain>.workers.dev`). Until the secrets are
-   set, no bot can start and every call is refused.
+2. **Deploy.** `npm run deploy` checks `bots.json` again, then deploys the
+   Worker with it as the `BOTS_CONFIG` secret, in one version, and prints
+   the Worker's address (`https://p2p-bots.<your subdomain>.workers.dev`).
+   Until the other secrets are set, no bot can start and every call is
+   refused.
 
    ```sh
    npm run deploy
@@ -175,7 +194,7 @@ address.
 
 ## Day to day
 
-- **A new config:** edit `bots.json`, then `npm run deploy`. A deploy
+- **A new config:** edit your `bots.json`, then `npm run deploy`. A deploy
   restarts the object; the running session is cut short, and the next one
   starts with the new config, which keeps listed what it lists and cancels
   what it no longer lists, as a restart does on a machine.
@@ -238,11 +257,11 @@ swap across a restart of its host.
 
 | File | What it holds |
 |---|---|
-| `bots.json` | The bots and their configs; deployed with the Worker. |
+| `bots.example.json` | The template of your `bots.json` (your bots and their configs; never committed): `npm run deploy` uploads that as the `BOTS_CONFIG` secret. |
 | `wrangler.jsonc` | The Worker: its object, its cron, its CPU limit, `KIT_ALLOW_MAINNET`, and the secrets it reads. |
 | `src/worker.ts` | The Worker and its Durable Object (`BotFleet`). |
 | `src/fleet.ts` | The sessions, the bots' states, the control calls. |
 | `src/http.ts` | The control API and its token. |
 | `src/fetch.ts` | The fetch of every request: never follows a redirect (the runtime has no redirect "error"). |
-| `scripts/check-config.ts` | `npm run check-config`. |
+| `scripts/check-config.ts`, `scripts/deploy.ts` | `npm run check-config`; `npm run deploy` (the Worker, with `bots.json` as its `BOTS_CONFIG` secret). |
 | `test/` | The tests above; `test/workerd/` is a test Worker, never deployed. |

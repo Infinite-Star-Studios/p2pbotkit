@@ -182,6 +182,25 @@ export function loadBots(raw: unknown): Bots {
   return { list, error: null };
 }
 
+/**
+ * The bots as the Worker gets them: the text of its BOTS_CONFIG secret,
+ * which npm run deploy uploads from your bots.json. bots.json stays on your
+ * machine and out of the repository: it holds your prices, your limits and,
+ * with a Base RPC of your own, that RPC's key.
+ */
+export function loadBotsConfig(text: unknown): Bots {
+  if (typeof text !== 'string' || !text.trim()) {
+    return { list: [], error: 'No bots yet: the BOTS_CONFIG secret is not set. Make bots.json from bots.example.json, then npm run deploy, which uploads it as BOTS_CONFIG.' };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { list: [], error: 'The BOTS_CONFIG secret is not JSON. Check bots.json with npm run check-config, then npm run deploy.' };
+  }
+  return loadBots(raw);
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 export type Mode = 'stopped' | 'running' | 'stopping';

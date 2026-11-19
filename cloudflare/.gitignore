@@ -6,3 +6,6 @@ dist/
 # Your control token and store keys (README.md, "Set it up").
 control-token
 *.key
+# Your bots' config: uploaded as the BOTS_CONFIG secret by npm run deploy, never committed
+# (its prices, limits and RPC address are yours alone). bots.example.json is the template.
+bots.json

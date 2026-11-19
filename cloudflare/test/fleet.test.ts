@@ -8,7 +8,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { Fleet, loadBots, SESSION_MS, DEADMAN_MS, NEXT_MS, JOIN_POLL_MS, BACKOFF_MS, type FleetHost, type FleetKit } from '../src/fleet.js';
+import { Fleet, loadBots, loadBotsConfig, SESSION_MS, DEADMAN_MS, NEXT_MS, JOIN_POLL_MS, BACKOFF_MS, type FleetHost, type FleetKit } from '../src/fleet.js';
 import { tokenToRaw, usdcToRaw, P2P_TOKENS, type HostedKitOptions, type LocalOffer, type LocalTrade, type OfferInput, type Policy, type Trade } from '../../src/index.js';
 
 const T0 = 1_790_000_000_000;
@@ -179,6 +179,15 @@ describe('bots.json', () => {
     // Whether a config can be used never depends on the secrets: npm run check-config and the Worker agree.
     const instant = { network: 'devnet', offers: [{ ...SELL, mode: 'instant' }] };
     assert.equal(loadBots({ seller: instant }).list[0]!.error, null);
+  });
+
+  test('the BOTS_CONFIG secret: not set, not JSON, or the bots of bots.json', () => {
+    assert.match(loadBotsConfig(undefined).error!, /BOTS_CONFIG secret is not set.*npm run deploy/);
+    assert.match(loadBotsConfig('  ').error!, /not set/);
+    assert.match(loadBotsConfig('{"market": ').error!, /BOTS_CONFIG secret is not JSON/);
+    const ok = loadBotsConfig(JSON.stringify({ market: mainnetBot() }));
+    assert.equal(ok.error, null);
+    assert.deepEqual(ok.list.map((b) => [b.name, b.error]), [['market', null]]);
   });
 
   test('an instant offer needs the bot\'s API key secret: without it the start is refused, as for a missing key', async () => {

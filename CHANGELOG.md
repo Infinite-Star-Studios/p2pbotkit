@@ -20,8 +20,9 @@ refusal are the same.
   the mainnet yes, `stop`, `halt`); `cloudflare/README.md` has the setup.
   A session runs the runner's own trading loop for about 6 minutes; its
   end is a pause, never a stop, and the next session resumes from the
-  store. No call can change what a bot trades: that is `bots.json`,
-  deployed with the Worker. A running bot whose entry leaves `bots.json`
+  store. No call can change what a bot trades: that is your `bots.json`,
+  which `npm run deploy` uploads as the Worker's `BOTS_CONFIG` secret and
+  which is never committed. A running bot whose entry leaves `bots.json`
   (or whose config there breaks) stops with the config it last ran with,
   and needs a new start to run again.
 - The store keeps its rules in `KitStore` and its records behind a

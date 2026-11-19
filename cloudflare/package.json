@@ -10,7 +10,7 @@
     "test": "node --import tsx --test test/*.test.ts",
     "check-config": "tsx scripts/check-config.ts",
     "dev": "wrangler dev",
-    "deploy": "npm run check-config && wrangler deploy",
+    "deploy": "tsx scripts/deploy.ts",
     "test:workerd": "node test/workerd/run.mjs"
   },
   "devDependencies": {

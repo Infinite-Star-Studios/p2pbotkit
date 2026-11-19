@@ -1,9 +1,10 @@
 /**
  * The Cloudflare Worker that runs the kit's bots (README.md here):
  *
- *   - BotFleet, its one Durable Object, runs every bot of bots.json in
- *     sessions driven by its alarm (fleet.ts), with each bot's records in the
- *     object's SQLite (SqlBackend) and its keys from the Worker's secrets;
+ *   - BotFleet, its one Durable Object, runs every bot of the BOTS_CONFIG
+ *     secret (your bots.json) in sessions driven by its alarm (fleet.ts),
+ *     with each bot's records in the object's SQLite (SqlBackend) and its
+ *     keys from the Worker's secrets;
  *   - fetch serves the control API behind CONTROL_TOKEN (http.ts);
  *   - scheduled, every 10 minutes (wrangler.jsonc), re-arms the alarm should
  *     it ever be lost while a bot runs; the alarm itself runs the bots.
@@ -11,10 +12,9 @@
 import { DurableObject } from 'cloudflare:workers';
 import { createHostedKit } from '../../src/index.js';
 import { sleep } from '../../src/board.js';
-import { Fleet, loadBots, type Reply } from './fleet.js';
+import { Fleet, loadBotsConfig, type Reply } from './fleet.js';
 import { handle } from './http.js';
 import { noRedirectFetch } from './fetch.js';
-import BOTS from '../bots.json';
 
 export interface Env {
   FLEET: DurableObjectNamespace<BotFleet>;
@@ -22,6 +22,8 @@ export interface Env {
   CONTROL_TOKEN?: string;
   /** "1": mainnet bots may start (with their start's own yes as well). A var of wrangler.jsonc. */
   KIT_ALLOW_MAINNET?: string;
+  /** The bots and their configs, as JSON: npm run deploy uploads your bots.json as this secret. */
+  BOTS_CONFIG?: string;
 }
 
 /** The one object that runs every bot: the name every call and the cron use. */
@@ -52,7 +54,7 @@ export class BotFleet extends DurableObject<Env> {
       print: (line) => console.log(line),
       // Every request of the kits: never follows a redirect (the runtime has no redirect "error"; fetch.ts).
       fetch: noRedirectFetch(globalThis.fetch.bind(globalThis))
-    }, loadBots(BOTS));
+    }, loadBotsConfig(env.BOTS_CONFIG));
   }
 
   status(): Reply { return this.#fleet.status(); }
