@@ -76,6 +76,11 @@ function asText(r: Reply): string {
       const a = x.address as { pha?: string; base?: string } | undefined;
       if (a) out.push(`  addresses: ${a.pha}, ${a.base}`);
       if (Array.isArray(x.openOffers)) out.push(`  open offers: ${(x.openOffers as number[]).map((id) => `#${id}`).join(', ') || 'none'}`);
+      const z = x.sizing as { everyS?: number; lastLookAt?: string | null; nextLookAt?: string | null; lastLook?: string | null } | undefined;
+      if (z) {
+        out.push(`  offers sized from the balances every ${z.everyS} s: ${z.lastLookAt ? `last look ${z.lastLookAt}, next ${z.nextLookAt}` : 'its next session looks'}`);
+        if (z.lastLook) out.push(`  last look: ${z.lastLook}`);
+      }
       if (Array.isArray(x.runningTrades)) out.push(`  running trades: ${(x.runningTrades as Array<{ id: number; status: string }>).map((t) => `#${t.id} (${t.status})`).join(', ') || 'none'}`);
       for (const l of (x.lastLines as string[] | undefined) ?? []) out.push(`  ${l}`);
     }

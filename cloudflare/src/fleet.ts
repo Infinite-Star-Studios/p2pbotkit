@@ -49,7 +49,7 @@
 import { P2P_CONFIG, SqlBackend, networkProblem, type HostedKitOptions, type SqlDatabase } from '../../src/index.js';
 import { redact } from '../../src/redact.js';
 import {
-  parseHostedConfig, trade, printPreflight, dryRunRest, readOnlyTransports, explain, describeOffer, SESSION_PAUSED,
+  parseHostedConfig, trade, printPreflight, dryRunRest, readOnlyTransports, explain, describeOffer, SESSION_PAUSED, SIZE_EVERY_S,
   type BotKit, type HostedBotConfig, type SignalSource
 } from '../../examples/seller-bot.js';
 
@@ -250,6 +250,16 @@ interface Live { readonly end: AbortController; readonly signals: Signals; reado
 
 const usdcOf = (cfg: HostedBotConfig) => P2P_CONFIG[cfg.network].base.usdcSymbol;
 
+/**
+ * What the object keeps of a bot's last look at its balances (kv `size:<name>`): `of` is what was sized (sizedOf);
+ * `at` the time the next look is counted from (trade() may set it earlier than the look, to look again sooner);
+ * `lookedAt` when the look was made and `said` its sentence, for status.
+ */
+interface Sized { of: string; at: number; lookedAt: number; said: string }
+
+/** What a kept look was made for: the offers and what is held back. Another value, and the next session looks at once. */
+const sizedOf = (cfg: HostedBotConfig): string => JSON.stringify([cfg.offers, cfg.holdBack ?? {}]);
+
 /** A bot with a config to run. */
 type Runnable = BotDef & { cfg: HostedBotConfig };
 
@@ -413,6 +423,40 @@ export class Fleet {
     };
   }
 
+  /**
+   * When the bot's offers were last sized from the balances (sizeFromBalances), kept across sessions for the config
+   * deployed now: without it every session, about ten an hour, would look at the balances at its start. A changed
+   * offer or holdBack makes the next session look at once. The look's own time and sentence are kept for status.
+   */
+  #sized(def: Runnable) {
+    const key = `size:${def.name}`;
+    const of = sizedOf(def.cfg);
+    return {
+      load: (): number | null => {
+        const v = this.#host.kv.get(key) as Sized | undefined;
+        return v && v.of === of && typeof v.at === 'number' && Number.isFinite(v.at) ? v.at : null;
+      },
+      save: (at: number, said?: string): void => { this.#host.kv.put(key, { of, at, lookedAt: this.#host.now(), said: said ?? '' } satisfies Sized); }
+    };
+  }
+
+  /** Forget when the bot's offers were last sized: its next session with sizeFromBalances looks at once. */
+  #unsized(name: string): void {
+    if (this.#host.kv.get(`size:${name}`) !== undefined) this.#host.kv.delete(`size:${name}`);
+  }
+
+  /**
+   * For status: how often a bot with sizeFromBalances looks at its balances, its last look with what it said, and
+   * the next one. No look is kept (none yet, a start since, or the config changed): the next session looks.
+   */
+  #sizing(name: string, cfg: HostedBotConfig): { everyS: number; lastLookAt: string | null; nextLookAt: string | null; lastLook: string | null } {
+    const everyS = cfg.sizeEveryS ?? SIZE_EVERY_S;
+    const v = this.#host.kv.get(`size:${name}`) as Sized | undefined;
+    const iso = (ms: unknown): string | null => (typeof ms === 'number' && Number.isFinite(ms) ? new Date(ms).toISOString() : null);
+    if (!v || v.of !== sizedOf(cfg) || iso(v.at) === null) return { everyS, lastLookAt: null, nextLookAt: null, lastLook: null };
+    return { everyS, lastLookAt: iso(v.lookedAt), nextLookAt: iso(v.at + everyS * 1000), lastLook: typeof v.said === 'string' && v.said ? v.said : null };
+  }
+
   // ── Sessions ─────────────────────────────────────────────────────────────
 
   /** One bot's session, ending at `endAt` or when `stop` aborts (or sooner: a clean stop, a halt, a failure). Never throws. */
@@ -436,11 +480,15 @@ export class Fleet {
       const st = this.#state(name);
       // The config this session runs with: should the bot leave bots.json, it stops with it (#adoptOrphans).
       if (!def.orphan) this.#host.kv.put(`cfg:${name}`, def.cfg);
+      // sizeFromBalances: the time of the last look is kept here. Without the option nothing is kept, so that turning
+      // it on looks at once. (An orphan only stops; a config the object kept before this option has no such key.)
+      const sizing = !def.orphan && def.cfg.sizeFromBalances === true;
+      if (!sizing) this.#unsized(name);
       kit = await this.#host.makeKit(this.#kitOptions(def, { mainnet: st.mainnet === true, log: this.#kitLog(name) }));
       const code = await trade(kit, def.cfg, {
         say, usdc: usdcOf(def.cfg), now: () => this.#host.now(), sleep: (ms, signal) => this.#host.sleep(ms, signal), signals: live.signals,
         // The mode is read as trade() starts: a stop asked while the kit was being built is not lost.
-        session: { until: end.signal, stopping: this.#state(name).mode === 'stopping', takeDue: this.#takeDue(def) }
+        session: { until: end.signal, stopping: this.#state(name).mode === 'stopping', takeDue: this.#takeDue(def), ...(sizing ? { sized: this.#sized(def) } : {}) }
       });
       await this.#snapshot(name, kit);
       const now = this.#host.now();
@@ -571,7 +619,9 @@ export class Fleet {
         ...(d.orphan ? { orphan: true } : {}),
         configError: d.error,
         secrets: this.#secretsProblem(d) ?? 'set',
-        offers: d.cfg ? d.cfg.offers.map((w) => describeOffer(w, usdcOf(d.cfg!))) : [],
+        // With sizeFromBalances an entry's total is the most it lists, not what is listed.
+        offers: d.cfg ? d.cfg.offers.map((w) => `${d.cfg!.sizeFromBalances === true ? 'at most ' : ''}${describeOffer(w, usdcOf(d.cfg!))}`) : [],
+        ...(d.cfg?.sizeFromBalances === true && !d.orphan ? { sizing: this.#sizing(d.name, d.cfg) } : {}),
         ...(snap ? {
           address: snap.address, openOffers: snap.openOffers, runningTrades: snap.trades,
           seenAt: new Date(snap.at).toISOString()
@@ -679,6 +729,8 @@ export class Fleet {
       return reply(409, { name, error: `Not started: ${blocking.join(', ')} failed in the preflight.`, blocking, lines });
     }
     this.#setState(name, { mode: 'running', since: this.#host.now(), ...(yes ? { mainnet: true } : {}) });
+    // A start looks at the balances at once, as a start on a machine does: whatever happened while it was stopped.
+    this.#unsized(name);
     say(`Started${yes ? ' on mainnet' : ''}: its sessions run it from now on, each about ${Math.round(this.#t.sessionMs / 60_000)} minutes, one after the other.`);
     await this.#schedule();
     return reply(200, { name, mode: 'running', lines });

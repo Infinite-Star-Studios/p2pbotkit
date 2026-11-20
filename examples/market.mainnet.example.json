@@ -11,5 +11,8 @@
   "acceptAfterS": null,
   "claimWatchS": null,
   "claimMode": "self",
-  "usePermit": true
+  "usePermit": true,
+  "sizeFromBalances": false,
+  "sizeEveryS": null,
+  "holdBack": {}
 }

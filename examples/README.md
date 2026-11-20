@@ -96,6 +96,8 @@ needs (the token for a sell, USDC for a buy), and lists it again when the
 board closes or fills it. Accepting checks its funds again, take by take: a
 bot never accepts a take its balance cannot cover. One faucet claim covers
 a few example trades; the totals in the example offers are larger than that.
+With `sizeFromBalances` a bot lists what it holds instead, and looks at its
+balances again every hour ("Offers sized from the balances", below).
 
 ## The config
 
@@ -121,6 +123,9 @@ before anything is read or sent.
 | `claimWatchS` | `null` (60 s on devnet) | How long a buyer waits for the keeper to claim its tokens before it claims them itself. |
 | `claimMode` | `"self"` | `"self"`: the seller claims its USDC itself and never sends its secret to the board. `"reveal-then-self"`: it gives the secret to Saturn's keeper, and claims itself if the keeper has not. |
 | `usePermit` | `true` | Lock USDC with a permit in one transaction; `false` approves exactly the amount, then locks. |
+| `sizeFromBalances` | `false` | `true`: the bot lists each offer at what it holds, never more than the offer's `total`, and looks at its balances again every `sizeEveryS` seconds ("Offers sized from the balances", below). `false`: every offer is listed at its `total` as written, whatever the bot holds. |
+| `sizeEveryS` | `null` (3600 s, an hour) | With `sizeFromBalances`: the seconds between two looks at the balances, a whole number from 300 to 86400. Without it, it does nothing. |
+| `holdBack` | `{}` | With `sizeFromBalances`: amounts the bot holds back from its offers, by token, as text: `{"KCAL": "100", "USDC": "20"}` (`C`, `RA`, `TAZ`, `SOUL`, `KCAL`; `USDC` is for the buy offers; `"0"` is none). On KCAL and SOUL it comes besides what a seller's lock needs on top. Without `sizeFromBalances`, it does nothing. |
 
 An offer (in `offers` or `bids`):
 `{"symbol": "TAZ", "total": "30", "min": "1", "max": "5", "price": "1.08"}`,
@@ -141,6 +146,63 @@ up to 2 TAZ into bids at 1.05 or more every 120 seconds (`sellDownTo`);
 `maxPrice` instead of `minPrice` buys from asks at that price or less
 (`buyUpTo`). `everyS` is at least 10; `maxLegs` (1 to 8) caps the trades
 of one order.
+
+## Offers sized from the balances
+
+Without this option an offer is listed at the `total` its entry gives,
+whatever the bot holds. With `"sizeFromBalances": true` a sell offer lists
+what the bot holds of its token, and a buy offer what the bot's USDC buys at
+the offer's price (at its `limitPrice` when it follows the reference price),
+rounded down to hundredths of a token. `total` is then the most the offer
+ever lists and `max` the most one trade takes; `max` is lowered to the
+listed amount when that is smaller, and under `min` nothing is listed. So a
+`total` written for the balance of one day lets the offer shrink and never
+grow: set `total` and `max` to the most you would ever want listed. One
+offer holds at most 100,000 C, 10,000 RA, 10,000,000 TAZ, 100,000,000 SOUL
+or 300,000,000 KCAL, and one trade costs at most 10,000 USDC on mainnet.
+When an entry's own `total` is what holds an offer under what the bot could
+list, the bot says so at each look.
+
+The board cannot change the amounts of an open offer, so another size is a
+cancel and a new listing: the offer is listed again under a new number.
+Every `sizeEveryS` seconds (an hour unless you set it) the bot reads its
+balances and asks the board what is left of each offer. It lists an offer
+again when the offer promises more than the bot could fill, when it has less
+than its smallest trade left, or when it differs from what the bot could
+list by one smallest trade or more. A sale lowers what is left of an offer
+and the balance alike, so by itself it changes nothing. Between two looks
+the bot reads no balance for an offer that is listed; an offer that its own
+trades have used up is looked at within a minute. Each look ends with one
+sentence that starts "Sized the offers from the balances" and says when the
+next one comes.
+
+What the bot can fill is what an accept and a lock would let it: a token's
+liquid balance, and the USDC on Base, each without what its own running
+trades still need and without one order of each recurring order (`take`)
+that spends the same balance. It lists no sell offer while it holds less
+than 1.1 SOUL, or less KCAL than a lock's gas may take (3 KCAL), and no buy
+offer while it holds less than 3 KCAL (a buyer claims its tokens with them)
+or no ETH on Base. `holdBack` holds more back: with `{"USDC": "20"}` the
+last 20 USDC never go into a buy offer. An entry that sells KCAL or SOUL
+needs its `holdBack` (`"0"` for none): the bot pays the gas of every
+Phantasma transaction in KCAL, and an offer sized from the balance would
+sell it down to what one lock needs.
+
+Sell offers of one token share that token's balance, and every buy offer
+shares the USDC, in the config's order: the first lists what it asks for,
+the next what is left.
+
+- An offer a take is waiting on is not cancelled, since the cancel would
+  cancel that take: the bot looks at it again a minute later, three times
+  at most.
+- An offer that follows the reference price with a `dailyMax` is sized when
+  it is listed and never listed again by a look: a new listing would start
+  its 24 hours again. To list it again, change its entry.
+- Each time an offer is listed again, the store keeps the record of the
+  closed one.
+- Before you turn the option off, put each `total` back to an amount the
+  bot holds: without the option every offer is listed at its `total` as
+  written.
 
 ## Prices and the devnet ratio
 
@@ -185,7 +247,10 @@ chain, the preflight), then reads the board (its open offers, the feed of done
 trades, the reference price) and prints what it would list and take. It sends
 nothing: its board calls can only be GETs, its chain transports refuse every
 send, and its closing lines count the writes and sends it refused (always 0)
-and name any check a real start would stop on.
+and name any check a real start would stop on. With `sizeFromBalances` it
+prints what a look at the balances would do now. It knows what is left of
+an offer from the board's public list alone (asking for one offer is a
+write), so an offer the board no longer shows is printed as kept.
 
 ## Stopping, restarting
 

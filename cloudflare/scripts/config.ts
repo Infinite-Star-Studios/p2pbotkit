@@ -7,7 +7,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { loadBots } from '../src/fleet.js';
-import { describeOffer } from '../../examples/seller-bot.js';
+import { describeOffer, sizingWords } from '../../examples/seller-bot.js';
 import { P2P_CONFIG } from '../../src/index.js';
 
 /** The largest value a Worker secret holds (5 KB). */
@@ -45,7 +45,12 @@ export function readBotsFile(file: string): BotsFile {
     const usdc = P2P_CONFIG[b.cfg.network].base.usdcSymbol;
     lines.push(`${b.name} (${b.cfg.network}):`);
     if (b.cfg.offers.length === 0 && b.cfg.take.length === 0) lines.push('  lists and takes nothing: add its offers, bids or orders');
-    for (const w of b.cfg.offers) lines.push(`  keeps listed: ${describeOffer(w, usdc)}`);
+    // With sizeFromBalances an offer's total is the most it lists: said, so that totals written for an earlier balance
+    // are seen before the deploy.
+    const sized = b.cfg.sizeFromBalances === true;
+    if (sized) lines.push(`  ${sizingWords(b.cfg, usdc).replace(/^S/, 's')}`);
+    else if (b.cfg.sizeEveryS !== null || Object.keys(b.cfg.holdBack).length > 0) lines.push('  sizeEveryS and holdBack do nothing here: sizeFromBalances is not true');
+    for (const w of b.cfg.offers) lines.push(`  ${sized ? 'lists at most' : 'keeps listed'}: ${describeOffer(w, usdc)}`);
     for (const t of b.cfg.take) lines.push(`  every ${t.everyS} s: ${t.side} up to ${t.amount} ${t.symbol} at ${t.side === 'buy' ? 'most' : 'least'} ${t.limit} ${usdc}`);
     if (b.cfg.network === 'mainnet' && !b.cfg.baseRpc) lines.push('  baseRpc: none; on mainnet give it a Base RPC of your own (Cloudflare\'s addresses are shared, and the public RPC limits each address)');
     const apiKey = b.cfg.offers.some((w) => w.mode === 'instant') ? `${b.prefix}_API_KEY (needed: it lists an instant offer)` : `${b.prefix}_API_KEY (recommended)`;

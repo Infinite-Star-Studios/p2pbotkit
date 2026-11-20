@@ -10,12 +10,18 @@ import type { Reply } from '../src/fleet.js';
 
 const TOKEN = 'k'.repeat(TOKEN_MIN);
 
-function fake(): FleetApi & { calls: Array<[string, ...unknown[]]> } {
+function fake(o: { sized?: boolean } = {}): FleetApi & { calls: Array<[string, ...unknown[]]> } {
   const calls: Array<[string, ...unknown[]]> = [];
   const ok = (body: Record<string, unknown> = {}): Reply => ({ status: 200, body: { ok: true, ...body } });
   return {
     calls,
-    status: () => { calls.push(['status']); return ok({ bots: [{ name: 'market', network: 'mainnet', mode: 'running', since: '2026-11-18T00:00:00Z', secrets: 'set', openOffers: [3], runningTrades: [{ id: 40, status: 'pha_locked' }], lastLines: ['a line'] }] }); },
+    status: () => {
+      calls.push(['status']);
+      const market = { name: 'market', network: 'mainnet', mode: 'running', since: '2026-11-18T00:00:00Z', secrets: 'set', openOffers: [3], runningTrades: [{ id: 40, status: 'pha_locked' }], lastLines: ['a line'] };
+      // A bot with sizeFromBalances: one that has looked at its balances, and one whose next session will.
+      const looked = { everyS: 3600, lastLookAt: '2026-11-18T01:00:00.000Z', nextLookAt: '2026-11-18T02:00:00.000Z', lastLook: 'Sized the offers from the balances: 1 listed again. The next look is in 3600 s.' };
+      return ok({ bots: o.sized ? [market, { ...market, name: 'sized', sizing: looked }, { ...market, name: 'new', sizing: { everyS: 600, lastLookAt: null, nextLookAt: null, lastLook: null } }] : [market] });
+    },
     logs: (name, n) => { calls.push(['logs', name, n]); return ok({ lines: ['one', 'two'] }); },
     dryRun: async (name) => { calls.push(['dryRun', name]); return ok({ lines: ['Dry run done: nothing was sent.'] }); },
     start: async (name, mainnet) => { calls.push(['start', name, mainnet]); return mainnet ? ok({ lines: ['Started on mainnet'] }) : { status: 409, body: { ok: false, error: 'no yes' } }; },
@@ -79,11 +85,14 @@ describe('the routes', () => {
   });
 
   test('?text answers in lines: the status per bot, a call\'s lines, its note and error', async () => {
-    const f = fake();
+    const f = fake({ sized: true });
     const s = await (await handle(req('/status?text'), TOKEN, f)).text();
     assert.match(s, /^market \(mainnet\): running since 2026-11-18T00:00:00Z/);
     assert.match(s, /open offers: #3/);
     assert.match(s, /running trades: #40 \(pha_locked\)/);
+    assert.equal(s.split('\n').filter((l) => l.includes('sized from the balances')).length, 2, 'only for a bot with the option');
+    assert.match(s, /^  offers sized from the balances every 3600 s: last look 2026-11-18T01:00:00\.000Z, next 2026-11-18T02:00:00\.000Z\n  last look: Sized the offers from the balances: 1 listed again\. The next look is in 3600 s\.$/m);
+    assert.match(s, /^  offers sized from the balances every 600 s: its next session looks$/m);
     assert.match(await (await handle(req('/bots/market/start?text', { method: 'POST' }), TOKEN, f)).text(), /^Error: no yes/m);
     assert.match(await (await handle(req('/bots/market/halt?text', { method: 'POST' }), TOKEN, f)).text(), /halted\nRunning trades: #40/);
   });

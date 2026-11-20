@@ -54,6 +54,13 @@ class FakeKit {
   preflightGate: Promise<void> | null = null;
   /** After its signal aborts, run() takes this long to end: the step in flight finishing (a Base transaction being mined). */
   windDownMs = 0;
+  /** Raw units of a token where it holds another amount than the default, and its raw USDC. */
+  tokens = new Map<string, bigint>();
+  usdc = 10n ** 12n;
+  /** What the board says is left of an offer (raw units; its total when not set). */
+  left = new Map<number, bigint>();
+  /** How often the balances and the board's word on an offer were read. */
+  reads = { balances: 0, readFunds: 0, heartbeat: 0 };
   #next = 1;
   constructor(readonly clock: () => number, network: 'devnet' | 'mainnet', readonly sleep: (ms: number) => Promise<void> = async () => {}) { this.network = network; }
   count(fn: string): number { return this.calls.filter((c) => c.fn === fn).length; }
@@ -61,14 +68,30 @@ class FakeKit {
   readonly board = {
     offers: async () => [],
     recent: async () => ({ trades: [], next: null }),
-    reference: async () => { throw new Error('no reference on the fake kit'); }
+    reference: async () => { throw new Error('no reference on the fake kit'); },
+    heartbeat: async (id: number) => {
+      this.reads.heartbeat++;
+      const o = this.offers.find((x) => x.id === id && x.closedAt == null);
+      if (!o) throw new Error(`the fake board has no open offer #${id}`);
+      return { offer: { id, status: 'open', remaining: (this.left.get(id) ?? BigInt(o.tazTotal)).toString(), follow: null }, trades: [], waited: false };
+    }
   };
   readonly store = {
     listOffers: async () => this.offers.map((o) => ({ ...o })),
     listTrades: async () => this.trades.map((t) => ({ ...t }))
   };
-  readonly pha = { balances: async () => new Map(P2P_TOKENS.map((t) => [t.symbol, { raw: 10n ** 15n, decimals: t.decimals }])) };
-  readonly base = { readFunds: async () => ({ usdc: 10n ** 12n, allowance: 0n, eth: 10n ** 18n }) };
+  readonly pha = {
+    balances: async () => {
+      this.reads.balances++;
+      return new Map(P2P_TOKENS.map((t) => [t.symbol, { raw: this.tokens.get(t.symbol) ?? 10n ** 15n, decimals: t.decimals }]));
+    }
+  };
+  readonly base = {
+    readFunds: async () => {
+      this.reads.readFunds++;
+      return { usdc: this.usdc, allowance: 0n, eth: 10n ** 18n };
+    }
+  };
   async preflight() {
     this.#call('preflight');
     if (this.preflightGate) await this.preflightGate;
@@ -277,6 +300,67 @@ describe('sessions: an alarm runs every running bot for SESSION_MS, then sets th
     const st = w.fleet.status().body.bots as Array<Record<string, unknown>>;
     assert.deepEqual(st[0]!.openOffers, [1]);
     assert.equal(st[0]!.mode, 'running');
+  });
+
+  test('sizeFromBalances: one look at the balances per sizeEveryS, however many sessions; a changed offer, turning it off and on, and a start look at once; status says when', async () => {
+    const SIZED = { offers: [SELL], sizeFromBalances: true, sizeEveryS: 3_600 };
+    const totals = (kit: FakeKit) => kit.calls.filter((c) => c.fn === 'postOffer').map((c) => (c.arg as OfferInput).total);
+    const w = world({ market: devnetBot(SIZED) });
+    await w.fleet.start('market');
+    const kit = w.kits.get('market')!;
+    kit.tokens.set('TAZ', tokenToRaw('TAZ', '12.345'));
+    assert.equal(w.kvMap.has('size:market'), false);
+    assert.deepEqual((w.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!.sizing, { everyS: 3_600, lastLookAt: null, nextLookAt: null, lastLook: null }, 'no look yet: its next session looks');
+    await session(w);
+    assert.deepEqual(totals(kit), ['12.34'], 'listed at what it holds, under the config\'s 30');
+    assert.equal(kit.reads.balances, 1);
+    const kept = w.kvMap.get('size:market') as { of: string; at: number; lookedAt: number; said: string };
+    assert.equal(kept.said, 'Sized the offers from the balances: 1 listed. The next look is in 3600 s.');
+    assert.equal(kept.at, kept.lookedAt, 'a look that decided everything counts from its own time');
+    // Eight more sessions, 55 minutes in all: the look is not due, and no session reads a balance at its start.
+    for (let i = 0; i < 8; i++) await session(w);
+    assert.equal(kit.count('run'), 9);
+    assert.deepEqual(kit.reads, { balances: 1, readFunds: 0, heartbeat: 0 }, 'nine sessions, one look');
+    const st = (w.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!;
+    assert.deepEqual(st.sizing, { everyS: 3_600, lastLookAt: new Date(kept.lookedAt).toISOString(), nextLookAt: new Date(kept.lookedAt + 3_600_000).toISOString(), lastLook: kept.said });
+    assert.deepEqual(st.offers, ['at most sell 30 TAZ (1 to 5 per trade) at 1.08 mUSDC'], 'the config\'s total is the most it lists');
+    // The balance fell meanwhile. Once the hour is over the look comes, once, and the offer is listed again at what the bot holds.
+    kit.tokens.set('TAZ', tokenToRaw('TAZ', '8'));
+    for (let i = 0; i < 3; i++) await session(w);
+    assert.equal(kit.reads.balances, 2);
+    assert.deepEqual(totals(kit), ['12.34', '8']);
+    assert.equal(kit.count('cancelOffer'), 1);
+    assert.ok((w.kvMap.get('size:market') as { lookedAt: number }).lookedAt >= kept.lookedAt + 3_600_000);
+    // A deploy with another total: what was kept is for another config, so the next session looks at once.
+    const w2 = world({ market: devnetBot({ ...SIZED, offers: [{ ...SELL, total: '40' }] }) }, {}, w);
+    assert.deepEqual((w2.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!.sizing, { everyS: 3_600, lastLookAt: null, nextLookAt: null, lastLook: null });
+    await session(w2);
+    assert.equal(kit.reads.balances, 3);
+    assert.deepEqual(totals(kit), ['12.34', '8'], 'the offer at 8 TAZ is still its entry: nothing listed again');
+    // A deploy with the same config: nothing is read.
+    const w3 = world({ market: devnetBot({ ...SIZED, offers: [{ ...SELL, total: '40' }] }) }, {}, w2);
+    await session(w3);
+    assert.equal(kit.reads.balances, 3);
+    // Turned off: nothing is kept (and the offer goes back to the config's total, whatever the bot holds).
+    const w4 = world({ market: devnetBot({ offers: [{ ...SELL, total: '40' }] }) }, {}, w3);
+    await session(w4);
+    assert.equal(w4.kvMap.has('size:market'), false);
+    assert.deepEqual(totals(kit), ['12.34', '8', '40']);
+    assert.equal((w4.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!.sizing, undefined);
+    // Turned on again: it looks at once, though the last look was minutes ago.
+    const w5 = world({ market: devnetBot({ ...SIZED, offers: [{ ...SELL, total: '40' }] }) }, {}, w4);
+    const before = kit.reads.balances;
+    await session(w5);
+    assert.equal(kit.reads.balances, before + 1);
+    assert.deepEqual(totals(kit), ['12.34', '8', '40', '8']);
+    assert.equal(w5.kvMap.has('size:market'), true);
+    // A halt, then a start: the start forgets the last look, so its first session looks (whatever moved meanwhile).
+    await w5.fleet.halt('market');
+    assert.equal((await w5.fleet.start('market')).status, 200);
+    assert.equal(w5.kvMap.has('size:market'), false);
+    const read = kit.reads.balances;
+    await session(w5);
+    assert.equal(kit.reads.balances, read + 1);
   });
 
   test('a recurring order keeps its time across sessions: no early take when a session starts', async () => {

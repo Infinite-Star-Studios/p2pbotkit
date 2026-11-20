@@ -20,7 +20,9 @@
  *   4. keeps the config's offers listed: `offers` are sell offers, `bids`
  *      buy offers. One the board closed or filled is listed again, while the
  *      bot holds what one smallest trade needs; an offer the config no longer
- *      lists is cancelled;
+ *      lists is cancelled. With `sizeFromBalances`, each offer is listed at
+ *      what the bot holds, at most its `total`, and the bot looks again every
+ *      `sizeEveryS` seconds ("Offers sized from the balances", below);
  *   5. every `take.everyS` seconds sells into bids (`minPrice`: sellDownTo)
  *      or buys from asks (`maxPrice`: buyUpTo);
  *   6. kit.run(): accepts takes whose checks pass once seen for acceptAfterS,
@@ -53,17 +55,17 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
   createKit, SafetyError, BoardError, P2P_CONFIG, MAX_TAKES, networkProblem, tokenOf, tokenToRaw, usdcToRaw, fromRaw, redact,
-  type Kit, type KitOptions, type KitInternals, type Policy, type OfferInput, type LocalOffer, type Offer, type Reference,
+  type Kit, type KitOptions, type KitInternals, type Policy, type OfferInput, type LocalOffer, type LocalTrade, type Offer, type Reference,
   type PreflightReport, type Network, type Side
 } from '../src/index.js';
-import { checkToken, offerCheck } from '../src/checks.js';
+import { checkToken, offerCheck, sellerNeeds } from '../src/checks.js';
 import { secretShapedArg } from '../src/keys.js';
-import { phaRpc, balanceOf, type PhaRpc } from '../src/pha.js';
+import { phaRpc, balanceOf, type PhaRpc, type PhaBalances } from '../src/pha.js';
 import { baseClient, type BaseClient } from '../src/base.js';
-import { DEFAULT_API, USDC_DECIMALS, INSTANT_NETWORKS, instantTiming, phaPinned, baseDeployed } from '../src/pins.js';
-import { usdcFor, amountText } from '../src/rules.js';
+import { DEFAULT_API, USDC_DECIMALS, INSTANT_NETWORKS, SOUL_RESERVE, PHA_LOCK_KCAL, instantTiming, phaPinned, baseDeployed } from '../src/pins.js';
+import { usdcFor, amountText, followOfferProblem, FOLLOW_TAKE_USD_MAX } from '../src/rules.js';
 import { errorText } from '../src/redact.js';
-import { sleep as realSleep, type SleepFn } from '../src/board.js';
+import { sleep as realSleep, CreateError, type SleepFn } from '../src/board.js';
 
 // ── The config ───────────────────────────────────────────────────────────────
 
@@ -102,15 +104,27 @@ export interface BotConfig {
   claimWatchS: number | null;
   claimMode: 'self' | 'reveal-then-self';
   usePermit: boolean;
+  /** List each offer at what the bot holds, at most its total ("Offers sized from the balances", below). false: at the config's totals. */
+  sizeFromBalances: boolean;
+  /** Seconds between two looks at the balances; null: SIZE_EVERY_S. */
+  sizeEveryS: number | null;
+  /** What the sizing holds back from the offers, by symbol (a token of the kit, or "USDC" for the buy offers): whole units, decimal text. */
+  holdBack: Record<string, string>;
 }
 
 const CONFIG_KEYS = ['network', 'api', 'apiKeyFile', 'keys', 'dataDir', 'phaRpc', 'baseRpc', 'offers', 'bids', 'take',
-  'acceptOnTheirOwn', 'acceptAfterS', 'claimWatchS', 'claimMode', 'usePermit'] as const;
+  'acceptOnTheirOwn', 'acceptAfterS', 'claimWatchS', 'claimMode', 'usePermit', 'sizeFromBalances', 'sizeEveryS', 'holdBack'] as const;
 const OFFER_KEYS = ['symbol', 'total', 'min', 'max', 'price', 'follow', 'mode'] as const;
 const FOLLOW_KEYS = ['offsetBps', 'limitPrice', 'dailyMax'] as const;
 const TAKE_KEYS = ['symbol', 'amount', 'minPrice', 'maxPrice', 'everyS', 'maxLegs'] as const;
 /** The shortest pause between two recurring orders: each one reads the book and may take, so seconds apart is plenty. */
 const MIN_EVERY_S = 10;
+/** Seconds between two looks at the balances (sizeFromBalances) when the config's sizeEveryS is null: an hour. */
+export const SIZE_EVERY_S = 3600;
+/** The shortest time between two looks: each one reads both chains, and may cancel an offer and list it again. */
+const MIN_SIZE_EVERY_S = 300;
+/** The key of `holdBack` for the USDC on Base, whatever the network calls its USDC. */
+const HOLD_USDC = 'USDC';
 
 const configError = (text: string) => new SafetyError('BAD_CONFIG', text);
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -226,6 +240,20 @@ function parseTake(v: unknown, where: string): TakeOrder {
   return { side: hasMax ? 'buy' : 'sell', symbol, amount, limit, everyS, ...(maxLegs !== undefined ? { maxLegs } : {}) };
 }
 
+/** The config's `holdBack`: what the sizing holds back from the offers, by symbol ("0": nothing). */
+function parseHoldBack(v: unknown): Record<string, string> {
+  if (v === undefined || v === null) return {};
+  if (!isObj(v)) throw configError('holdBack is an object such as {"KCAL": "100", "USDC": "20"}: what the bot holds back from its offers, by token.');
+  const out: Record<string, string> = {};
+  for (const [k, amount] of Object.entries(v)) {
+    if (k !== HOLD_USDC && checkToken(k)) throw configError(`holdBack has an unknown key "${k}" (allowed: C, RA, TAZ, SOUL, KCAL, ${HOLD_USDC}).`);
+    if (typeof amount !== 'string' || !amount.trim()) throw configError(`holdBack.${k} is an amount, as text.`);
+    if (!/^0+(\.0+)?$/.test(amount)) asConfigError(`holdBack.${k}`, () => (k === HOLD_USDC ? usdcToRaw(amount, 'The amount') : tokenToRaw(k, amount)));
+    out[k] = amount;
+  }
+  return out;
+}
+
 /**
  * Check a bot config (parsed JSON) and fill in its defaults. Throws
  * SafetyError BAD_CONFIG naming the first problem; nothing is read or sent
@@ -261,6 +289,19 @@ export function parseBotConfig(raw: unknown): BotConfig {
   if (instantAt >= 0 && !apiKeyFile) {
     throw configError(`offers[${instantAt}].mode "instant" needs an API key the owner flagged for instant offers: name its file as "apiKeyFile".`);
   }
+  const every = raw.sizeEveryS;
+  if (every !== undefined && every !== null && (typeof every !== 'number' || !Number.isInteger(every) || every < MIN_SIZE_EVERY_S || every > 86_400)) {
+    throw configError(`sizeEveryS is a whole number of seconds from ${MIN_SIZE_EVERY_S} to 86400, or null for ${SIZE_EVERY_S} (an hour).`);
+  }
+  const sizeFromBalances = bool('sizeFromBalances', false);
+  const holdBack = parseHoldBack(raw.holdBack);
+  // Sized from the balance, an offer that sells KCAL or SOUL would sell them down to what one lock needs, and the bot
+  // pays the gas of every Phantasma transaction in KCAL and keeps SOUL free as a seller: the config says what it holds back.
+  for (const [i, w] of (sizeFromBalances ? offers : []).entries()) {
+    const t = tokenOf(w.symbol);
+    if (w.side !== 'sell' || !(t?.gas || t?.stake) || holdBack[w.symbol] !== undefined) continue;
+    throw configError(`offers[${i}] sells ${w.symbol} with sizeFromBalances on: say in holdBack.${w.symbol} how much ${w.symbol} the bot holds back (${t.gas ? 'it pays the gas of every Phantasma transaction in KCAL' : 'a seller keeps SOUL free for the fees of Phantasma'}).`);
+  }
   return {
     network,
     api: optText(raw, 'api', 'The config') ?? DEFAULT_API,
@@ -275,7 +316,10 @@ export function parseBotConfig(raw: unknown): BotConfig {
     acceptAfterS: seconds(raw, 'acceptAfterS'),
     claimWatchS: seconds(raw, 'claimWatchS'),
     claimMode,
-    usePermit: bool('usePermit', true)
+    usePermit: bool('usePermit', true),
+    sizeFromBalances,
+    sizeEveryS: every ?? null,
+    holdBack
   };
 }
 
@@ -417,7 +461,7 @@ export function readOnlyTransports(network: Network, given: KitInternals | undef
 
 /** What the runner uses of a Kit (createKit's Kit has all of it; tests pass a fake). */
 export type BotKit = Pick<Kit, 'network' | 'address' | 'preflight' | 'postOffer' | 'cancelOffer' | 'buyUpTo' | 'sellDownTo' | 'run' | 'close'> & {
-  readonly board: Pick<Kit['board'], 'offers' | 'recent' | 'reference'>;
+  readonly board: Pick<Kit['board'], 'offers' | 'recent' | 'reference' | 'heartbeat'>;
   readonly store: Pick<Kit['store'], 'listOffers' | 'listTrades'>;
   readonly pha: Pick<Kit['pha'], 'balances'>;
   readonly base: Pick<Kit['base'], 'readFunds'>;
@@ -455,6 +499,12 @@ const TICK_MS = 5_000;
 const SYNC_EVERY_MS = 60_000;
 /** While stopping, the running trades are named this often. */
 const NOTE_EVERY_MS = 60_000;
+/** With sizeFromBalances: an offer the bot holds too little for, and a look that could not finish, are taken up again this often, not at every sync (each look reads the chains). */
+const SHORT_AGAIN_MS = 300_000;
+/** A listing whose answer from the board was lost is not sent again for this long: run() first settles whether it was made. */
+const SETTLE_MS = 120_000;
+/** A take that waits on an offer holds that offer's sizing back for this many looks in a row at most; then the offer is cancelled with the take, which the bot had not answered in all that time. */
+const MAX_WAITS = 3;
 /** One Ctrl-C that a wrapper delivers twice within this long counts once. */
 const DOUBLE_SIGNAL_MS = 500;
 /** Preflight items that do not stop a start (the bot reports them; each step checks its own funds again). */
@@ -522,6 +572,326 @@ async function fundsShort(kit: BotKit, w: OfferInput, usdcSymbol: string): Promi
   } catch {
     return null;
   }
+}
+
+// ── Offers sized from the balances (cfg.sizeFromBalances) ────────────────────
+//
+// The board has no call that changes an open offer's amounts: another size is a cancel and a new listing. So the bot
+// lists an offer at what it holds when it lists it, and looks again every sizeEveryS seconds. An offer that then
+// promises more than the bot can fill, that has less than its smallest trade left, or that differs from what the bot
+// could list by one smallest trade or more, is cancelled and listed again. A sale lowers what is left of an offer and
+// the balance alike, so it changes nothing here.
+
+/** Raw units as the decimal text the kit takes for an amount ("1234.5": no separators, no trailing zeros). */
+export function plainAmount(raw: bigint, decimals: number): string {
+  const unit = 10n ** BigInt(decimals);
+  const frac = (raw % unit).toString().padStart(decimals, '0').replace(/0+$/, '');
+  return `${raw / unit}${frac ? `.${frac}` : ''}`;
+}
+
+/** `raw` rounded down to hundredths of a whole token: an amount a person can read, and never more than `raw`. */
+function roundedDown(raw: bigint, decimals: number): bigint {
+  const step = 10n ** BigInt(Math.max(0, decimals - 2));
+  return raw - (raw % step);
+}
+
+/**
+ * A config entry at another total (raw units, at most the entry's own): its
+ * largest trade, and a following offer's amount per day, are lowered to that
+ * total when they are larger. The entry itself at its own total.
+ */
+export function sizedOffer(w: OfferInput, total: bigint): OfferInput {
+  const raw = (v: string) => tokenToRaw(w.symbol, v);
+  if (total === raw(w.total)) return w;
+  const as = plainAmount(total, tokenOf(w.symbol)!.decimals);
+  const out: OfferInput = { ...w, total: as, max: raw(w.max) > total ? as : w.max };
+  if (w.follow?.dailyMax !== undefined && raw(w.follow.dailyMax) > total) out.follow = { ...w.follow, dailyMax: as };
+  return out;
+}
+
+/**
+ * Whether a kept open offer is this config entry as the sizing lists it: the
+ * entry at the kept offer's own total, which is at most the config's. So an
+ * offer listed at 163.28 is still this entry at the next start, whatever the
+ * balance is by then.
+ */
+export function sizedSame(k: LocalOffer, w: OfferInput, acceptOnTheirOwn: boolean): boolean {
+  if (k.side !== w.side || k.symbol !== w.symbol) return false;
+  const total = BigInt(k.tazTotal);
+  return total <= tokenToRaw(w.symbol, w.total) && sameOffer(k, sizedOffer(w, total), acceptOnTheirOwn);
+}
+
+/** Why the kit's own checks would refuse to list this offer (check 7, and a following offer's own rules), or null. */
+function listingProblem(network: Network, o: OfferInput): string | null {
+  const raw = (v: string) => tokenToRaw(o.symbol, v);
+  const amounts = { symbol: o.symbol, tazTotal: raw(o.total), tazMin: raw(o.min), tazMax: raw(o.max) };
+  if (!o.follow) return offerCheck(network, { ...amounts, price: usdcToRaw(o.price!) })?.text ?? null;
+  const follow = { offsetBps: o.follow.offsetBps, limitPrice: usdcToRaw(o.follow.limitPrice), dailyMax: raw(o.follow.dailyMax ?? o.total) };
+  return followOfferProblem({ ...amounts, side: o.side, follow }, P2P_CONFIG[network].base, FOLLOW_TAKE_USD_MAX[network]);
+}
+
+/** What a sizing knows of the open listing of one config entry. */
+export interface SizedListing {
+  id: number;
+  /** Raw units listed (the kept offer's total). */
+  total: bigint;
+  /** Raw units it can still take (the board's `remaining`); null when the board was not asked, or did not answer. */
+  left: bigint | null;
+  /** 'take': a take on it waits for its answer, and a cancel would cancel that take. 'paused': the board has paused it (a following offer it cannot price now). */
+  hold: 'take' | 'paused' | null;
+}
+
+/**
+ * What a sizing does with one config entry (planSizes). `more`: raw units
+ * the bot could list for this entry were its `total` not the limit (set when
+ * that is at least one smallest trade above the total).
+ */
+export type SizeStep =
+  /** Listed, and left as it is; `why` when the bot would have listed it again but does not. */
+  | { do: 'keep'; why?: string; more?: bigint }
+  /** Not listed: list this. */
+  | { do: 'list'; offer: OfferInput; more?: bigint }
+  /** Cancel offer `id`, which has `left` left, then list this. */
+  | { do: 'relist'; id: number; left: bigint; offer: OfferInput; more?: bigint }
+  /** Cancel offer `id`: the bot cannot fill its smallest trade now. */
+  | { do: 'unlist'; id: number; left: bigint; why: string }
+  /** A take waits on offer `id`: decided at the next sync. */
+  | { do: 'wait'; id: number }
+  /** Not listed, and nothing to list now. */
+  | { do: 'none'; why: string };
+
+export interface SizeInput {
+  network: Network;
+  /** The config's offers, in its order. */
+  offers: readonly OfferInput[];
+  /** The config's recurring orders: one order of each is held back from the balance it spends. */
+  take: readonly TakeOrder[];
+  /** Per entry of `offers`: its open listing, or null. */
+  listed: ReadonlyArray<SizedListing | null>;
+  /** Per entry of `offers`: whether its listing may be replaced now (the timed look, or a look at that entry). An entry without a listing is listed either way. */
+  look: readonly boolean[];
+  /** The bot's liquid Phantasma balances; null when they could not be read. */
+  pha: PhaBalances | null;
+  /** The bot's raw USDC and its wei on Base; null when they could not be read. */
+  base: { usdc: bigint; eth: bigint } | null;
+  /** The bot's own trades (the store's), for what the running ones still need from the balances. */
+  trades: readonly LocalTrade[];
+  /** The bot's kept offers, open and closed (the trades of an instant offer count differently). */
+  kept: readonly LocalOffer[];
+  address: { pha: string; base: string };
+  holdBack: Readonly<Record<string, string>>;
+  /** The network's name for its USDC, for the reasons. */
+  usdcSymbol: string;
+}
+
+export interface SizePlan {
+  /** One step per entry of `offers`, in its order. */
+  steps: SizeStep[];
+  /** Every balance and every listing a look needed was known (a listing that waits for a take is a step of its own). */
+  complete: boolean;
+}
+
+/**
+ * What to list from the balances. Sell offers of one token share that
+ * token's balance, and every buy offer shares the USDC: within such a group
+ * the config's order decides, the first entry taking what it asks for and
+ * the next what is left.
+ *
+ * What the bot can fill is what an accept would let it (Engine.#sellerFunds,
+ * checks.buyerReady) and its lock would need: a token's liquid balance
+ * without the KCAL or SOUL its lock needs on top, only while the address
+ * keeps the SOUL every seller needs and the KCAL of a lock's gas; the USDC
+ * on Base, only while the bot holds the KCAL a buyer keeps for its claim and
+ * some ETH for its lock's gas. Each without what the bot's own trades that
+ * are not locked yet still take, and without one order of each recurring
+ * order that spends the same balance. `keep` holds more back.
+ */
+export function planSizes(x: SizeInput): SizePlan {
+  const net = P2P_CONFIG[x.network];
+  const pos = (v: bigint) => (v > 0n ? v : 0n);
+  const instant = new Set(x.kept.filter((k) => k.mode === 'instant').map((k) => k.id));
+  const myBase = x.address.base.toLowerCase();
+  // As Engine.sellerCommitted, and counting a take still waiting for the bot's own answer too: the tokens of the bot's
+  // trades as the seller that are not locked yet (an instant trade's until its lock reads as its own).
+  const owedTokens = (symbol: string): bigint => {
+    let sum = 0n;
+    for (const r of x.trades) {
+      if (r.role !== 'S' || r.symbol !== symbol || r.myPha !== x.address.pha || r.endedAt) continue;
+      if (r.h && !(r.maker && instant.has(r.offerId) && r.t1 === undefined)) continue;
+      if (r.status === undefined || r.status === 'requested' || r.status === 'accepted' || r.status === 'base_locked') sum += BigInt(r.taz);
+    }
+    return sum;
+  };
+  // As checks.waitingUsdc, counting a take still waiting for the bot's own answer too, and a trade whose USDC lock was
+  // sent but is not reported yet: its USDC may still be in the balance (then counted twice for a moment, never not at all).
+  const owedUsdc = (): bigint => {
+    let sum = 0n;
+    for (const r of x.trades) {
+      if (r.role !== 'B' || r.myBase !== myBase || r.endedAt) continue;
+      if (r.status === undefined || r.status === 'requested' || r.status === 'accepted' || r.status === 'pha_locked') sum += BigInt(r.usdc);
+    }
+    return sum;
+  };
+  /** What a group of offers can still draw on: `hard` is all the bot could fill, `soft` that without `holdBack`; `have` is the balance itself. */
+  interface Pool { hard: bigint; soft: bigint; have: bigint; short: string | null }
+  const none = (short: string): Pool => ({ hard: 0n, soft: 0n, have: 0n, short });
+  /** The config's `holdBack` of a token, or of the USDC, in raw units. */
+  const heldBack = (key: string): bigint => {
+    const v = x.holdBack[key];
+    if (v === undefined || /^0+(\.0+)?$/.test(v)) return 0n;
+    return key === HOLD_USDC ? usdcToRaw(v) : tokenToRaw(key, v);
+  };
+  const pools = new Map<string, Pool | null>();
+  const poolOf = (w: OfferInput): Pool | null => {
+    const key = w.side === 'sell' ? `sell ${w.symbol}` : 'buy';
+    if (pools.has(key)) return pools.get(key)!;
+    let p: Pool | null = null;
+    const kcal = balanceOf(x.pha, 'KCAL') ?? 0n;
+    const kcalText = (raw: bigint) => `${amountText(raw, tokenOf('KCAL')!.decimals)} KCAL`;
+    if (w.side === 'sell' && x.pha) {
+      const soul = balanceOf(x.pha, 'SOUL') ?? 0n;
+      if (soul < SOUL_RESERVE) {
+        p = none(`this bot's Phantasma address keeps ${amountText(soul, 8)} SOUL free, less than the ${amountText(SOUL_RESERVE, 8)} SOUL every seller needs for Phantasma's fees`);
+      } else if (kcal < PHA_LOCK_KCAL) {
+        p = none(`this bot's Phantasma address holds ${kcalText(kcal)}, less than the ${kcalText(PHA_LOCK_KCAL)} a lock's gas may take`);
+      } else {
+        const orders = x.take.filter((o) => o.side === 'sell' && o.symbol === w.symbol).reduce((sum, o) => sum + tokenToRaw(o.symbol, o.amount), 0n);
+        const have = balanceOf(x.pha, w.symbol) ?? 0n;
+        const hard = pos(have - sellerNeeds(net, w.symbol, 0n) - owedTokens(w.symbol) - orders);
+        p = { hard, soft: pos(hard - heldBack(w.symbol)), have, short: null };
+      }
+    } else if (w.side === 'buy' && x.base && x.pha) {
+      if (kcal < net.phaClaimKcal) {
+        p = none(`this bot's Phantasma address holds ${kcalText(kcal)}, less than the ${kcalText(net.phaClaimKcal)} a buyer keeps to claim its tokens`);
+      } else if (x.base.eth <= 0n) {
+        p = none('this bot\'s Base address holds no ETH for the gas of its USDC lock');
+      } else {
+        const orders = x.take.filter((o) => o.side === 'buy').reduce((sum, o) => sum + usdcFor(tokenToRaw(o.symbol, o.amount), usdcToRaw(o.limit), o.symbol), 0n);
+        const hard = pos(x.base.usdc - owedUsdc() - orders);
+        p = { hard, soft: pos(hard - heldBack(HOLD_USDC)), have: x.base.usdc, short: null };
+      }
+    }
+    pools.set(key, p);
+    return p;
+  };
+
+  // A buy offer draws on the USDC at its price; one that follows the reference price at its limit, the most it pays.
+  const priceOf = (w: OfferInput): bigint | null => (w.side === 'buy' ? usdcToRaw(w.price ?? w.follow!.limitPrice) : null);
+  /** What `tokens` of an entry take from its group: tokens of a sell, the USDC of a buy. */
+  const takesOf = (w: OfferInput, tokens: bigint): bigint => {
+    const price = priceOf(w);
+    return price === null ? tokens : usdcFor(tokens, price, w.symbol);
+  };
+  const useOf = (pool: Pool, amount: bigint): void => {
+    pool.hard = pos(pool.hard - amount);
+    pool.soft = pos(pool.soft - amount);
+  };
+  // A listing that is not looked at now stays as it is, wherever its entry stands in the config: what it can still
+  // take (its total, when the board was not asked) is set aside before anything else is sized.
+  x.offers.forEach((w, i) => {
+    const listing = x.listed[i] ?? null;
+    const pool = listing && x.look[i] !== true ? poolOf(w) : null;
+    if (listing && pool) useOf(pool, takesOf(w, listing.left ?? listing.total));
+  });
+
+  const steps: SizeStep[] = [];
+  let complete = true;
+  x.offers.forEach((w, i) => {
+    const t = tokenOf(w.symbol)!;
+    const raw = (v: string) => tokenToRaw(w.symbol, v);
+    const min = raw(w.min);
+    const price = priceOf(w);
+    const takes = (tokens: bigint): bigint => takesOf(w, tokens);
+    const listing = x.listed[i] ?? null;
+    const looked = x.look[i] === true;
+    const pool = poolOf(w);
+    if (!pool) {
+      // A balance is not known now: nothing is listed, and nothing is replaced, on a guess.
+      if (looked || !listing) complete = false;
+      const unread = w.side === 'sell' || !x.pha ? 'Phantasma balances' : `${x.usdcSymbol} balance`;
+      steps.push(listing ? { do: 'keep' } : { do: 'none', why: `its ${unread} could not be read` });
+      return;
+    }
+    const use = (amount: bigint): void => useOf(pool, amount);
+    const room = price === null ? pool.soft : (pool.soft * 10n ** BigInt(t.decimals)) / price;
+    const cap = raw(w.total);
+    const most = room < cap ? room : cap;
+    // Rounded down; but the smallest trade itself when the bot holds that and the rounding fell under it.
+    let want = roundedDown(most, t.decimals);
+    if (want < min) want = most >= min ? min : 0n;
+    // The balance, and what of it is left for this entry when its other offers, its trades, its orders, a lock's
+    // KCAL or SOUL, or holdBack take a part.
+    const short = (): string => {
+      if (pool.short) return pool.short;
+      const what = w.side === 'sell' ? t.symbol : x.usdcSymbol;
+      const decimals = w.side === 'sell' ? t.decimals : USDC_DECIMALS;
+      const part = pool.soft === pool.have ? '' : `, of which ${amountText(pool.soft, decimals)} ${what} are free for this offer`;
+      return w.side === 'sell'
+        ? `this bot's Phantasma address holds ${amountText(pool.have, decimals)} ${what}${part}, less than the smallest trade (${w.min} ${what})`
+        : `this bot's Base address holds ${amountText(pool.have, decimals)} ${what}${part}, less than the smallest trade needs (${amountText(takes(min), decimals)} ${what})`;
+    };
+    const sized = want > 0n ? sizedOffer(w, want) : null;
+    // The entry's own total is what holds it under what the bot could list: said, so that a total written for an
+    // earlier balance does not look like a sizing that does nothing.
+    const more = most === cap && roundedDown(room, t.decimals) >= cap + min ? { more: roundedDown(room, t.decimals) } : {};
+    // The kit's own checks of a listing, before anything is cancelled for it (a following offer's largest trade has a
+    // cap of its own, which an offer passes while it is small and can fail once it is larger).
+    const refused = sized ? listingProblem(x.network, sized) : null;
+    if (!listing) {
+      if (sized && !refused) {
+        steps.push({ do: 'list', offer: sized, ...more });
+        use(takes(want));
+      } else {
+        steps.push({ do: 'none', why: refused ? `the kit would refuse it at ${sized!.total} ${t.symbol} (${refused})` : short() });
+      }
+      return;
+    }
+    // Not looked at now: left as listed, and already set aside above.
+    if (!looked) {
+      steps.push({ do: 'keep' });
+      return;
+    }
+    // Left as listed too: a listing the board said nothing of; one the board has paused (it could not be listed
+    // again now).
+    if (listing.left === null || listing.hold === 'paused') {
+      if (listing.left === null) complete = false;
+      steps.push({ do: 'keep' });
+      use(takes(listing.left ?? listing.total));
+      return;
+    }
+    const left = listing.left;
+    const spent = left < min;
+    const over = takes(left) > pool.hard;
+    const apart = (want > left ? want - left : left - want) >= min;
+    // A following offer with an amount per day is never listed again by the sizing: a new listing would start its
+    // 24 hours again, and the day's amount with it.
+    if (w.follow?.dailyMax !== undefined) {
+      const why = spent || over || apart ? { why: 'it has an amount per day (dailyMax), and a new listing would start its 24 hours again; to list it again, change its entry in the config' } : {};
+      steps.push({ do: 'keep', ...why });
+      use(takes(left));
+      return;
+    }
+    if (!spent && !over && !apart) {
+      steps.push({ do: 'keep', ...more });
+      use(takes(left));
+      return;
+    }
+    if (listing.hold === 'take') {
+      steps.push({ do: 'wait', id: listing.id });
+      use(takes(left));
+      return;
+    }
+    if (refused) {
+      steps.push({ do: 'keep', why: `listed again at ${sized!.total} ${t.symbol} the kit would refuse it (${refused})` });
+      use(takes(left));
+    } else if (sized) {
+      steps.push({ do: 'relist', id: listing.id, left, offer: sized, ...more });
+      use(takes(want));
+    } else {
+      steps.push({ do: 'unlist', id: listing.id, left, why: short() });
+    }
+  });
+  return { steps, complete };
 }
 
 /** Whether `moduleUrl` is the script node was started with. */
@@ -644,10 +1014,12 @@ export function printPreflight(report: PreflightReport, cfg: Pick<HostedBotConfi
 }
 
 /** The rest of a dry run: the board's GETs and the plan. Sends nothing. */
-export async function dryRunRest(kit: BotKit, cfg: Pick<HostedBotConfig, 'offers' | 'take' | 'acceptOnTheirOwn'>, x: { say: (l: string) => void; usdc: string; blocking: string[]; refused: () => { boardWrites: number; chainSends: number } }): Promise<number> {
+export async function dryRunRest(kit: BotKit, cfg: Pick<HostedBotConfig, 'offers' | 'take' | 'acceptOnTheirOwn'> & Partial<Pick<HostedBotConfig, 'sizeFromBalances' | 'sizeEveryS' | 'holdBack'>>, x: { say: (l: string) => void; usdc: string; blocking: string[]; refused: () => { boardWrites: number; chainSends: number } }): Promise<number> {
   const { say, usdc } = x;
+  let book: Offer[] | null = null;
   try {
     const offers = await kit.board.offers();
+    book = offers;
     say(`Board: ${offers.length} open offer(s).`);
     for (const line of bookLines(offers, usdc)) say(`  ${line}`);
   } catch (e) {
@@ -665,14 +1037,18 @@ export async function dryRunRest(kit: BotKit, cfg: Pick<HostedBotConfig, 'offers
     say(`Board: the reference price could not be read (${explain(e)}).`);
   }
   const kept = (await kit.store.listOffers()).filter((k) => k.closedAt == null);
-  for (const w of cfg.offers) {
-    const same = kept.find((k) => sameOffer(k, w, cfg.acceptOnTheirOwn));
-    if (same) {
-      say(`Would keep offer #${same.id} listed: ${describeOffer(w, usdc)}.`);
-      continue;
+  if (cfg.sizeFromBalances === true) {
+    await sizedDryRun(kit, cfg, { say, usdc, book });
+  } else {
+    for (const w of cfg.offers) {
+      const same = kept.find((k) => sameOffer(k, w, cfg.acceptOnTheirOwn));
+      if (same) {
+        say(`Would keep offer #${same.id} listed: ${describeOffer(w, usdc)}.`);
+        continue;
+      }
+      const short = await fundsShort(kit, w, usdc);
+      say(short ? `Would not list ${describeOffer(w, usdc)} yet: ${short}.` : `Would list: ${describeOffer(w, usdc)}.`);
     }
-    const short = await fundsShort(kit, w, usdc);
-    say(short ? `Would not list ${describeOffer(w, usdc)} yet: ${short}.` : `Would list: ${describeOffer(w, usdc)}.`);
   }
   for (const t of cfg.take) {
     say(`Would ${t.side} up to ${t.amount} ${t.symbol} every ${t.everyS} s, at ${t.side === 'buy' ? 'most' : 'least'} ${t.limit} ${usdc} per ${t.symbol}.`);
@@ -681,6 +1057,59 @@ export async function dryRunRest(kit: BotKit, cfg: Pick<HostedBotConfig, 'offers
   say(`Dry run done: nothing was sent (board writes refused: ${r.boardWrites}, chain sends refused: ${r.chainSends}).`);
   if (x.blocking.length) say(`A real start would stop here: ${x.blocking.join(', ')} (above).`);
   return x.blocking.length ? 1 : 0;
+}
+
+/** The option in words, for a start, a dry run and check-config: what is listed, how often the bot looks, what it holds back. */
+export function sizingWords(cfg: Partial<Pick<HostedBotConfig, 'sizeEveryS' | 'holdBack'>>, usdc = 'USDC'): string {
+  const held = Object.entries(cfg.holdBack ?? {}).filter(([, v]) => !/^0+(\.0+)?$/.test(v)).map(([k, v]) => `${v} ${k === HOLD_USDC ? usdc : k}`);
+  return `Sizes its offers from the balances, looking every ${cfg.sizeEveryS ?? SIZE_EVERY_S} s: each offer lists what the bot holds (a buy offer: what its ${usdc} covers), at most its total${held.length ? `; it holds back ${held.join(', ')}` : ''}`;
+}
+
+/** The words after a sized offer that lists less than its config entry allows. */
+const underTotal = (w: OfferInput, sized: OfferInput, usdc: string): string => (sized === w ? '' : ` (${w.side === 'sell' ? 'what the bot holds' : `what its ${usdc} covers`}; the config allows up to ${w.total} ${w.symbol})`);
+
+/** The kept open offer of each config entry as the sizing matches them (sizedSame), and the open offers no entry lists. */
+function sizedMatch(open: readonly LocalOffer[], cfg: Pick<HostedBotConfig, 'offers' | 'acceptOnTheirOwn'>): { mine: Array<LocalOffer | null>; others: LocalOffer[] } {
+  const used = new Set<number>();
+  const mine = cfg.offers.map((w) => {
+    const k = open.find((o) => !used.has(o.id) && sizedSame(o, w, cfg.acceptOnTheirOwn)) ?? null;
+    if (k) used.add(k.id);
+    return k;
+  });
+  return { mine, others: open.filter((k) => !used.has(k.id)) };
+}
+
+/**
+ * A dry run's offers with sizeFromBalances: what a look at the balances would
+ * do now. It reads the balances and the board's public list only (a
+ * heartbeat is a write, which a dry run never sends), so it knows what is
+ * left of an offer only while the board lists it.
+ */
+async function sizedDryRun(kit: BotKit, cfg: Pick<HostedBotConfig, 'offers' | 'take' | 'acceptOnTheirOwn'> & Partial<Pick<HostedBotConfig, 'sizeEveryS' | 'holdBack'>>, x: { say: (l: string) => void; usdc: string; book: readonly Offer[] | null }): Promise<void> {
+  const { say, usdc } = x;
+  say(`${sizingWords(cfg, usdc)}.`);
+  const all = await kit.store.listOffers();
+  const { mine, others } = sizedMatch(all.filter((k) => k.closedAt == null), cfg);
+  for (const k of others) say(`Would cancel offer #${k.id}: the config no longer lists it.`);
+  const trades = await kit.store.listTrades();
+  const pha = cfg.offers.length ? await kit.pha.balances(kit.address.pha).catch(() => null) : null;
+  const base = cfg.offers.some((w) => w.side === 'buy') ? await kit.base.readFunds(kit.address.base).catch(() => null) : null;
+  const listed = mine.map((k): SizedListing | null => {
+    if (!k) return null;
+    const shown = x.book?.find((o) => o.id === k.id);
+    return { id: k.id, total: BigInt(k.tazTotal), left: shown ? BigInt(shown.remaining) : null, hold: null };
+  });
+  const plan = planSizes({ network: kit.network, offers: cfg.offers, take: cfg.take, listed, look: cfg.offers.map(() => true), pha, base, trades, kept: all, address: kit.address, holdBack: cfg.holdBack ?? {}, usdcSymbol: usdc });
+  plan.steps.forEach((step, i) => {
+    const w = cfg.offers[i]!;
+    const k = mine[i];
+    const t = tokenOf(w.symbol)!;
+    if (step.do === 'list') say(`Would list: ${describeOffer(step.offer, usdc)}${underTotal(w, step.offer, usdc)}.`);
+    else if (step.do === 'relist') say(`Would cancel offer #${step.id}, which has ${units(step.left, t.decimals)} ${t.symbol} left, and list it again at ${w.side === 'sell' ? 'what the bot holds' : `what its ${usdc} covers`}: ${describeOffer(step.offer, usdc)}${underTotal(w, step.offer, usdc)}.`);
+    else if (step.do === 'unlist') say(`Would cancel offer #${step.id}: ${step.why}.`);
+    else if (step.do === 'none') say(`Would not list ${describeOffer(w, usdc)} yet: ${step.why}.`);
+    else if (k) say(`Would keep offer #${k.id} listed: ${describeOffer(sizedOffer(w, BigInt(k.tazTotal)), usdc)}${step.do === 'keep' && step.why ? ` (${step.why})` : ''}.`);
+  });
 }
 
 /** The book per token, in words: open asks and bids with the best price of each side. */
@@ -768,6 +1197,14 @@ export interface TradeSession {
   readonly stopping?: boolean;
   /** When each recurring order (cfg.take[i]) is next due, kept by the host across sessions: read at the start, written after each order. */
   readonly takeDue?: { load(): number[] | Promise<number[]>; save(due: readonly number[]): void | Promise<void> };
+  /**
+   * When the offers were last sized from the balances (cfg.sizeFromBalances;
+   * ms, or null for never), kept by the host across sessions: read at the
+   * start, written after each timed look with that look's sentence (for the
+   * host's status). Without it every session would size its offers at its
+   * start.
+   */
+  readonly sized?: { load(): number | null | Promise<number | null>; save(at: number, said?: string): void | Promise<void> };
 }
 
 /** What trade() returns when its session ended (TradeSession.until): nothing was stopped, and the next session carries on. */
@@ -878,6 +1315,256 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
     }
   };
 
+  // ── Offers sized from the balances (cfg.sizeFromBalances) ───────────────────
+  const sizing = cfg.sizeFromBalances === true;
+  const sizeEveryMs = (cfg.sizeEveryS ?? SIZE_EVERY_S) * 1000;
+  /** A look that left something undecided is made again after this long, not after the whole sizeEveryS. */
+  const sizeAgainMs = Math.min(SHORT_AGAIN_MS, sizeEveryMs);
+  /** The time the next look is counted from (ms; what the host keeps): null, never looked, so the first sync looks. */
+  let sizedAt: number | null = null;
+  /** When this session last looked at every offer, and whether that look left something undecided other than a waiting take. */
+  let lookedAt: number | null = null;
+  let loose = false;
+  /** The entries a take waited on: looked at again at each sync, until decided; and how many looks in a row each has waited. */
+  let again = new Set<number>();
+  const waited = new Map<number, number>();
+  /** Per kept offer: what its own trades had taken when the bot last looked at it for being used up. */
+  const usedUp = new Map<number, bigint>();
+  /** Per entry: until when it is not listed, after a listing whose answer from the board was lost. */
+  const settling = new Map<number, number>();
+  /** The entries that had no listing and nothing to list at the last look, and until when they are not read again. */
+  let shortOf = '';
+  let shortUntil = 0;
+
+  /**
+   * The sync with sizeFromBalances. Every time: an offer no entry lists is
+   * cancelled, and an entry without a listing is listed at what the bot
+   * holds. When the timed look is due as well: every listing is compared
+   * with the balances and, where planSizes says so, cancelled and listed
+   * again. An offer whose own trades have used it up is looked at without
+   * waiting for the timed look, and so is one a take waited on.
+   *
+   * A look compares what is listed with what the bot holds, so making it
+   * twice changes nothing the second time: a session cut in the middle only
+   * makes it again.
+   */
+  const syncSized = async (): Promise<void> => {
+    const halted = (): boolean => stopping || runCtl.signal.aborted;
+    const all = await kit.store.listOffers();
+    const { mine, others } = sizedMatch(all.filter((k) => k.closedAt == null), cfg);
+    // An offer no entry lists goes first: what it promised is then free for the entries.
+    for (const k of others) {
+      if (halted()) return;
+      try {
+        await kit.cancelOffer(k.id);
+        say(`Offer #${k.id} cancelled: the config no longer lists it.`);
+      } catch (e) {
+        note(`cancel:${k.id}`, `Offer #${k.id}, which the config no longer lists, could not be cancelled yet (${explain(e)}).`);
+      }
+    }
+    if (cfg.offers.length === 0) return;
+    // The trades first, then the balances: a lock that lands in between is counted twice (still owed, and gone from
+    // the balance), never not at all.
+    const trades = await kit.store.listTrades();
+    const known = new Set(trades.map((t) => t.id));
+    const full = sizedAt === null || now() >= sizedAt + sizeEveryMs || now() < sizedAt;
+    // What each listing's own trades have taken from it, as the board counts it: a take is given back only when it was
+    // never accepted. Under one smallest trade left, the board no longer shows the offer.
+    const taken = mine.map((k) => (k ? trades.reduce((sum, r) => {
+      const givenBack = r.status === 'cancelled' || (r.endedAt !== undefined && (r.status === undefined || r.status === 'requested'));
+      return r.maker && r.offerId === k.id && !givenBack ? sum + BigInt(r.taz) : sum;
+    }, 0n) : 0n));
+    const look = cfg.offers.map((w, i) => {
+      const k = mine[i];
+      if (!k) return false;
+      if (full || again.has(i)) return true;
+      return w.follow?.dailyMax === undefined && BigInt(k.tazTotal) - taken[i]! < tokenToRaw(w.symbol, w.min) && usedUp.get(k.id) !== taken[i];
+    });
+    const unlisted = cfg.offers.map((_, i) => !mine[i] && now() >= (settling.get(i) ?? 0));
+    const missing = unlisted.map((u, i) => (u ? String(i) : '')).join(',');
+    if (!look.some(Boolean) && (!unlisted.some(Boolean) || (missing === shortOf && now() < shortUntil))) return;
+    if (halted()) return;
+    const groupOf = (w: OfferInput): string => (w.side === 'sell' ? `sell ${w.symbol}` : 'buy');
+    const active = new Set(cfg.offers.filter((_, i) => look[i] || unlisted[i]).map(groupOf));
+    let pha: PhaBalances | null = null;
+    let base: { usdc: bigint; eth: bigint } | null = null;
+    try {
+      pha = await kit.pha.balances(kit.address.pha);
+      notes.delete('size:pha');
+    } catch (e) {
+      note('size:pha', `The bot's Phantasma balances could not be read (${explain(e)}): its offers stay as they are, and it looks again later.`);
+    }
+    if (pha && active.has('buy')) {
+      try {
+        base = await kit.base.readFunds(kit.address.base);
+        notes.delete('size:base');
+      } catch (e) {
+        note('size:base', `The bot's ${usdc} balance could not be read (${explain(e)}): its buy offers stay as they are, and it looks again later.`);
+      }
+    }
+    /** What the board says of one of the bot's listings now: 'gone' when it is no longer open there, null when it did not say. */
+    const heard = async (k: LocalOffer): Promise<{ left: bigint; taking: boolean; paused: boolean } | 'gone' | null> => {
+      try {
+        const a = await kit.board.heartbeat(k.id, k.makerToken, { retries: 1, maxRetryAfter: 10 });
+        notes.delete(`size:left:${k.id}`);
+        if (a.offer.status !== 'open') return 'gone';
+        // A take that waits for its answer, or one the bot has not kept yet: a cancel now would cancel it.
+        return { left: BigInt(a.offer.remaining), taking: a.trades.some((t) => t.status === 'requested' || !known.has(t.id)), paused: a.offer.follow?.state === 'paused' };
+      } catch (e) {
+        if (e instanceof BoardError && e.code === 'CLOSED') return 'gone';
+        note(`size:left:${k.id}`, `The board did not say what is left of offer #${k.id} (${explain(e)}): it stays as it is, and the bot looks again later.`);
+        return null;
+      }
+    };
+    /** Whether a take that waits on entry `i` still holds its sizing back (MAX_WAITS looks in a row at most). */
+    const patient = (i: number): boolean => (waited.get(i) ?? 0) < MAX_WAITS;
+    // The board last, right before deciding: what is left of each listing that shares a balance with an entry to
+    // decide, and whether a take waits on it.
+    const listed: Array<SizedListing | null> = [];
+    for (const [i, k] of mine.entries()) {
+      if (!k) {
+        listed.push(null);
+        continue;
+      }
+      const w = cfg.offers[i]!;
+      const read = w.side === 'sell' ? pha !== null : base !== null;
+      const said = active.has(groupOf(w)) && read && !halted() ? await heard(k) : null;
+      if (said === 'gone') {
+        // Closed on the board (filled, or cancelled where the bot's record missed it): recorded, and its entry is
+        // listed afresh in this same sync.
+        try {
+          await kit.cancelOffer(k.id);
+          say(`Offer #${k.id} is closed on the board: the bot lists its entry afresh.`);
+          mine[i] = null;
+          listed.push(null);
+          continue;
+        } catch (e) {
+          note(`cancel:${k.id}`, `Offer #${k.id}, which the board has closed, could not be recorded as closed yet (${explain(e)}).`);
+        }
+      }
+      const facts = said && said !== 'gone' ? said : null;
+      listed.push({ id: k.id, total: BigInt(k.tazTotal), left: facts?.left ?? null, hold: facts?.taking && patient(i) ? 'take' : facts?.paused ? 'paused' : null });
+    }
+    if (halted()) return;
+    const plan = planSizes({ network: cfg.network, offers: cfg.offers, take: cfg.take, listed, look, pha, base, trades, kept: all, address: kit.address, holdBack: cfg.holdBack ?? {}, usdcSymbol: usdc });
+    let undecided = !plan.complete;
+    let refusedNow = false;
+    let onlyShort = true;
+    const waits = new Set<number>();
+    const did = { listed: 0, again: 0, cancelled: 0, same: 0 };
+    const atTotal: string[] = [];
+    for (const [i, step] of plan.steps.entries()) {
+      const w = cfg.offers[i]!;
+      const t = tokenOf(w.symbol)!;
+      const k = mine[i];
+      const key = `post:${i}:${describeOffer(w)}`;
+      if (halted()) return;
+      if ('more' in step && step.more !== undefined) atTotal.push(`${w.side} ${w.symbol} (its total is ${w.total} ${w.symbol}; ${w.side === 'sell' ? 'the bot holds' : `its ${usdc} covers`} ${units(step.more, t.decimals)} ${w.symbol})`);
+      if (step.do === 'keep') {
+        did.same++;
+        if (look[i] && k) usedUp.set(k.id, taken[i]!);
+        if (step.why && k) note(key, `Offer #${k.id} stays as it is: ${step.why}.`);
+        else notes.delete(key);
+        continue;
+      }
+      if (step.do === 'none') {
+        if (w.side === 'sell' ? pha === null : base === null) onlyShort = false;
+        note(key, `Not listing ${describeOffer(w, usdc)} now: ${step.why}.`);
+        continue;
+      }
+      if (step.do === 'wait') {
+        waits.add(i);
+        note(`size:wait:${step.id}`, `Offer #${step.id} is not sized now: a take on it waits for its answer, and a cancel would cancel that take. The bot looks again at the next sync.`);
+        continue;
+      }
+      // After a cancel or a listing the board refused, nothing more is cancelled or listed in this look: what is
+      // listed stays listed.
+      if (refusedNow) {
+        undecided = true;
+        onlyShort = false;
+        continue;
+      }
+      if (step.do === 'unlist' || step.do === 'relist') {
+        // The board once more, right before the cancel, with nothing sent in between: a take that came in since the
+        // plan was made would be cancelled with the offer.
+        const said = await heard(k!);
+        if (!said) {
+          undecided = true;
+          continue;
+        }
+        if (said === 'gone' || (said.taking && patient(i)) || said.left !== step.left) {
+          waits.add(i);
+          continue;
+        }
+        if (halted()) return;
+        try {
+          await kit.cancelOffer(step.id);
+          notes.delete(`size:wait:${step.id}`);
+          say(step.do === 'unlist'
+            ? `Offer #${step.id} cancelled: ${step.why}.`
+            : `Offer #${step.id} cancelled to list it again at ${w.side === 'sell' ? 'what the bot holds' : `what its ${usdc} covers`} (it had ${units(step.left, t.decimals)} ${t.symbol} left).`);
+        } catch (e) {
+          refusedNow = true;
+          undecided = true;
+          note(`cancel:${step.id}`, `Offer #${step.id} could not be cancelled yet to size it (${explain(e)}); the bot looks again later.`);
+          continue;
+        }
+        if (step.do === 'unlist') {
+          did.cancelled++;
+          continue;
+        }
+        // The bot stops, or its session ended, between the two: the next sync or session lists it.
+        if (halted()) return;
+      }
+      try {
+        const rec = await kit.postOffer({ ...step.offer, acceptOnTheirOwn: cfg.acceptOnTheirOwn });
+        notes.delete(key);
+        if (step.do === 'relist') did.again++;
+        else did.listed++;
+        say(`Listed offer #${rec.id}: ${describeOffer(step.offer, usdc)}${underTotal(w, step.offer, usdc)}.`);
+      } catch (e) {
+        // It is listed at a later sync, as any entry without a listing; the look itself goes on without it.
+        refusedNow = true;
+        onlyShort = false;
+        if (e instanceof CreateError && e.mayExist) settling.set(i, now() + SETTLE_MS);
+        note(key, `Could not list ${describeOffer(step.offer, usdc)}: ${explain(e)}`);
+      }
+    }
+    for (const i of cfg.offers.keys()) {
+      if (waits.has(i)) waited.set(i, (waited.get(i) ?? 0) + 1);
+      else if (look[i]) waited.delete(i);
+    }
+    const none = plan.steps.map((step, i) => (step.do === 'none' ? String(i) : '')).join(',');
+    shortOf = onlyShort && plan.steps.some((step) => step.do === 'none') ? none : '';
+    shortUntil = shortOf ? now() + SHORT_AGAIN_MS : 0;
+    if (full) {
+      lookedAt = now();
+      loose = undecided;
+      again = waits;
+      const open = undecided || waits.size > 0;
+      // Something undecided: the next look comes after sizeAgainMs, not after the whole sizeEveryS.
+      sizedAt = open ? lookedAt - (sizeEveryMs - sizeAgainMs) : lookedAt;
+      const parts = [
+        did.again ? `${did.again} listed again` : '', did.listed ? `${did.listed} listed` : '', did.cancelled ? `${did.cancelled} cancelled` : '',
+        did.same ? `${did.same} left as listed` : '', waits.size ? `${waits.size} waiting for a take's answer` : ''
+      ].filter(Boolean);
+      const limited = atTotal.length ? ` The config's total is the limit for: ${atTotal.join('; ')}. Raise total and max there to list more.` : '';
+      const line = `Sized the offers from the balances: ${parts.join(', ') || 'nothing to list now'}.${limited} The next look is in ${(open ? sizeAgainMs : sizeEveryMs) / 1000} s${open ? ' (not every offer could be decided now)' : ''}.`;
+      await session?.sized?.save(sizedAt, line);
+      say(line);
+      return;
+    }
+    const had = again.size > 0;
+    again = undecided ? new Set([...again, ...waits]) : waits;
+    // Every offer a take had waited on is decided now: the next look is a whole sizeEveryS after the last one.
+    if (had && again.size === 0 && !loose && lookedAt !== null && sizedAt !== lookedAt) {
+      sizedAt = lookedAt;
+      const line = `Every offer is sized now. The next look is in ${Math.max(0, Math.round((lookedAt + sizeEveryMs - now()) / 1000))} s.`;
+      await session?.sized?.save(sizedAt, line);
+      say(line);
+    }
+  };
+
   /** Cancel every open offer of the bot; true once none is left open. */
   const cancelAll = async (): Promise<boolean> => {
     let all = true;
@@ -931,13 +1618,22 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
   let failure: unknown = null;
   let running: Promise<void> | null = null;
   try {
-    // As section 6.7 orders it: the offers first, then run().
-    await syncOffers();
+    // As section 6.7 orders it: the offers first, then run(). With sizeFromBalances the first sync comes right after
+    // run() has started instead: a look reads both chains and asks the board about every offer, and the trades that
+    // are running, with their takes to answer and their locks to send, do not wait behind that.
+    const sync = sizing ? syncSized : syncOffers;
+    if (sizing) {
+      const at = session?.sized ? await session.sized.load() : null;
+      sizedAt = typeof at === 'number' && Number.isFinite(at) ? at : null;
+      if (!session && !stopping) say(`${sizingWords(cfg, usdc)}.`);
+    } else {
+      await sync();
+    }
     running = kit.run(botPolicy(cfg, () => stopping), runCtl.signal).catch((e) => { failure = e; }).finally(() => {
       runCtl.abort();
       wakeUp();
     });
-    let nextSync = now() + SYNC_EVERY_MS;
+    let nextSync = sizing ? now() : now() + SYNC_EVERY_MS;
     let nextNote = 0;
     let cancelled = false;
     // When each order is next due: kept by a host across its sessions, so a session's start does not take early.
@@ -960,7 +1656,7 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
         }
       } else {
         if (now() >= nextSync) {
-          await syncOffers();
+          await sync();
           nextSync = now() + SYNC_EVERY_MS;
         }
         for (let i = 0; i < cfg.take.length && !stopping && !runCtl.signal.aborted; i++) {

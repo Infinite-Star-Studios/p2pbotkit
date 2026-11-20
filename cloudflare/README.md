@@ -176,7 +176,7 @@ lines rather than JSON. Replace `<url>` with the Worker's address.
 
 | Call | What it does |
 |---|---|
-| `GET <url>/status` | Every bot: stopped, running or stopping; its addresses, open offers, running trades, last failure and latest lines. |
+| `GET <url>/status` | Every bot: stopped, running or stopping; its addresses, open offers, the last and the next look at its balances (with `sizeFromBalances`), running trades, last failure and latest lines. |
 | `GET <url>/bots/market/logs?n=200` | The bot's latest lines (the ones since the object last started; Cloudflare's logs keep them all). |
 | `POST <url>/bots/market/dry-run` | What it would list and take now; sends nothing. A stopped bot only (it opens the bot's store). |
 | `POST <url>/bots/market/start` | The preflight, then it runs. Mainnet: the body `{"mainnet": true}`. |
@@ -200,6 +200,21 @@ address.
   what it no longer lists, as a restart does on a machine.
 - **A new kit version:** `git pull` in the kit's folder, `npm ci
   --ignore-scripts` in both folders, then `npm run deploy` here.
+- **Offers sized from the balances** (the bot lists an offer again, at
+  another size, when its balance has changed): in the bot's entry of
+  `bots.json` set `"sizeFromBalances": true`, and set each offer's `total`
+  and `max` to the most it should ever list (`../examples/README.md`,
+  "Offers sized from the balances", has the rules). Then
+  `npm run check-config`, which now says `lists at most:` for each offer,
+  and `npm run deploy`. The first session after a start, and after a deploy
+  that changed an offer or `holdBack`, looks at the balances at once. After
+  that the bot looks every `sizeEveryS` seconds (an hour unless you set
+  it): the object keeps the time of the last look, so a new session every
+  6 minutes does not look again. `status` shows the last look, what it
+  said, and the next one. An offer whose size changes is cancelled and
+  listed under a new number. Before you set the option back to `false`,
+  put each `total` back to an amount the bot holds: without the option
+  every offer is listed at its `total` as written.
 - **A failed session** (an RPC that does not answer, a secret not set yet)
   is tried again after 1 minute, then after 2, 4 and 8, and every
   15 minutes after that, until one runs. `status` shows the failure. Fix

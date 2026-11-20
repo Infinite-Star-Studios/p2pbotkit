@@ -37,6 +37,25 @@ test('bots.json: missing, not JSON, a bad config, too large for a secret, or usa
     assert.equal(r.minified, JSON.stringify({ market }), 'the secret\'s value: the same JSON, minified');
     writeFileSync(f, JSON.stringify({ market: { ...market, baseRpc: 'https://base-mainnet.example/v2/abc' } }));
     assert.doesNotMatch(readBotsFile(f).lines.join('\n'), /baseRpc: none/);
+    assert.doesNotMatch(r.lines.join('\n'), /sizeFromBalances|lists at most/, 'nothing new is said of a bot without the option');
+    // With sizeFromBalances: said first, and each offer's total is named as the most it lists.
+    writeFileSync(f, JSON.stringify({ market: { ...market, sizeFromBalances: true, sizeEveryS: 900, holdBack: { USDC: '20' } } }));
+    r = readBotsFile(f);
+    assert.equal(r.ok, true, r.lines.join('\n'));
+    assert.equal(r.lines[1], '  sizes its offers from the balances, looking every 900 s: each offer lists what the bot holds (a buy offer: what its USDC covers), at most its total; it holds back 20 USDC');
+    assert.equal(r.lines[2], '  lists at most: sell 30 TAZ (1 to 5 per trade) at 1.08 USDC');
+    assert.doesNotMatch(r.lines.join('\n'), /keeps listed/);
+    // The two other keys without the switch: accepted (the switch alone turns it off), and said to do nothing.
+    writeFileSync(f, JSON.stringify({ market: { ...market, sizeEveryS: 900 } }));
+    r = readBotsFile(f);
+    assert.equal(r.ok, true, r.lines.join('\n'));
+    assert.equal(r.lines[1], '  sizeEveryS and holdBack do nothing here: sizeFromBalances is not true');
+    assert.match(r.lines.join('\n'), /keeps listed: sell 30 TAZ/);
+    // A KCAL sale with the option says what it holds back, or the config is refused before any deploy.
+    writeFileSync(f, JSON.stringify({ market: { network: 'mainnet', offers: [{ symbol: 'KCAL', total: '100', min: '10', max: '100', price: '0.50' }], sizeFromBalances: true } }));
+    r = readBotsFile(f);
+    assert.equal(r.ok, false);
+    assert.match(r.lines.join('\n'), /market: cannot be used: .*offers\[0\] sells KCAL with sizeFromBalances on: say in holdBack\.KCAL/);
     const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`bot-${i}`, market]));
     writeFileSync(f, JSON.stringify(many));
     r = readBotsFile(f);

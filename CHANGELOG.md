@@ -47,6 +47,14 @@ refusal are the same.
   asked before the session, and the recurring orders' next times kept
   across sessions). Run from the command line, every bot behaves as
   before.
+- The runner: `sizeFromBalances` (off by default) lists each offer at what
+  the bot holds, at most its `total`, and looks at the balances again every
+  `sizeEveryS` seconds (an hour); `holdBack` holds amounts back. The board
+  cannot change the amounts of an open offer, so another size is a cancel
+  and a new listing. On Cloudflare the object keeps the time of the last
+  look across sessions (`TradeSession.sized`), and `status` shows it.
+  `examples/README.md`, "Offers sized from the balances", has the rules.
+  With the option off every bot behaves as before.
 
 ## 0.3.0 (13 November 2026)
 
