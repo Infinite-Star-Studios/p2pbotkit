@@ -1459,10 +1459,11 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
       const k = mine[i];
       const key = `post:${i}:${describeOffer(w)}`;
       if (halted()) return;
-      if ('more' in step && step.more !== undefined) atTotal.push(`${w.side} ${w.symbol} (its total is ${w.total} ${w.symbol}; ${w.side === 'sell' ? 'the bot holds' : `its ${usdc} covers`} ${units(step.more, t.decimals)} ${w.symbol})`);
+      if ('more' in step && step.more !== undefined) atTotal.push(`${w.side} ${w.symbol} (its total is ${w.total} ${w.symbol}; ${w.side === 'sell' ? 'the bot could list' : `its ${usdc} covers`} ${units(step.more, t.decimals)} ${w.symbol})`);
       if (step.do === 'keep') {
         did.same++;
         if (look[i] && k) usedUp.set(k.id, taken[i]!);
+        if (k) notes.delete(`size:wait:${k.id}`);
         if (step.why && k) note(key, `Offer #${k.id} stays as it is: ${step.why}.`);
         else notes.delete(key);
         continue;
@@ -1515,6 +1516,10 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
         }
         // The bot stops, or its session ended, between the two: the next sync or session lists it.
         if (halted()) return;
+      } else if (now() < (settling.get(i) ?? 0)) {
+        // Its last listing got no clear answer from the board and may exist: not sent again until run() has settled it.
+        onlyShort = false;
+        continue;
       }
       try {
         const rec = await kit.postOffer({ ...step.offer, acceptOnTheirOwn: cfg.acceptOnTheirOwn });
@@ -1556,6 +1561,19 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
     }
     const had = again.size > 0;
     again = undecided ? new Set([...again, ...waits]) : waits;
+    if (undecided) {
+      // A balance or the board could not be read for an offer that was looked at on its own: it is not looked at
+      // again at every sync for that; every offer is looked at after sizeAgainMs instead.
+      for (const [i, k] of mine.entries()) if (k && look[i]) usedUp.set(k.id, taken[i]!);
+      const soon = now() - (sizeEveryMs - sizeAgainMs);
+      if (sizedAt !== null && sizedAt > soon) {
+        sizedAt = soon;
+        const line = `An offer could not be sized now (a balance or the board was not read). Every offer is looked at again in ${sizeAgainMs / 1000} s.`;
+        await session?.sized?.save(sizedAt, line);
+        say(line);
+      }
+      return;
+    }
     // Every offer a take had waited on is decided now: the next look is a whole sizeEveryS after the last one.
     if (had && again.size === 0 && !loose && lookedAt !== null && sizedAt !== lookedAt) {
       sizedAt = lookedAt;

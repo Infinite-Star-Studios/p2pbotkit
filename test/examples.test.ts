@@ -2243,6 +2243,30 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.equal(open(kit3).length, 1);
     s3.end.abort();
     assert.equal(await drive(vt3, s3.p), SESSION_PAUSED);
+    // ... also when another entry is listed meanwhile: the look that lists the buy offer a minute later leaves the sell offer alone.
+    const vt4 = new VTime();
+    const kit4 = new FakeKit(vt4.now);
+    kit4.held.set('TAZ', tok('TAZ', '30'));
+    kit4.usdc = usdcToRaw('100');
+    const post4 = kit4.postOffer.bind(kit4);
+    let lost4 = true;
+    kit4.postOffer = async (o: OfferInput) => {
+      if (!lost4) return post4(o);
+      lost4 = false;
+      kit4.calls.push({ fn: 'postOffer', arg: o, at: vt4.now() });
+      throw new CreateError(new BoardError('NETWORK', 0, true), { kind: 'offer', tokenHash: 'cd'.repeat(32), mayExist: true });
+    };
+    const saved4: number[] = [];
+    const s4 = session(kit4, vt4, hosted({ ...SIZED, sizeEveryS: 3600 }), saved4);
+    await started(vt4, saved4);
+    assert.deepEqual(posts(kit4).map((o) => (o as OfferInput).symbol), ['TAZ'], 'after the lost answer nothing more is listed in that look');
+    await vt4.advance(60_000);
+    assert.deepEqual(posts(kit4).map((o) => (o as OfferInput).symbol), ['TAZ', 'C'], 'the buy offer is listed at the next sync; the sell offer is not sent again yet');
+    await vt4.advance(120_000);
+    assert.deepEqual(posts(kit4).map((o) => (o as OfferInput).symbol), ['TAZ', 'C', 'TAZ']);
+    assert.equal(open(kit4).length, 2);
+    s4.end.abort();
+    assert.equal(await drive(vt4, s4.p), SESSION_PAUSED);
     // Too little for the smallest trade: said once, and read again only every 5 minutes.
     const vt2 = new VTime();
     const kit2 = new FakeKit(vt2.now);
