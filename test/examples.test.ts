@@ -1833,6 +1833,10 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.equal(sizedSame(at, w, true), true);
     assert.equal(sizedSame(kept(w), w, true), true, 'one listed at the config\'s total, before the option was on, is the entry too');
     assert.equal(sizedSame(at, { ...w, total: '100', max: '100' }, true), false, 'more than the entry lists now');
+    const five = kept({ ...w, total: '163.28', max: '5' });
+    assert.equal(sizedSame(five, { ...w, total: '200', max: '5' }, true), true);
+    assert.equal(sizedSame(five, { ...w, total: '163.28', max: '5' }, true), true, 'exactly the entry\'s total');
+    assert.equal(sizedSame(five, { ...w, total: '100', max: '5' }, true), false, 'above the entry\'s total, whatever its largest trade: a total that was lowered is taken up at once');
     assert.equal(sizedSame(at, { ...w, price: '0.97' }, true), false);
     assert.equal(sizedSame(at, w, false), false);
     assert.equal(sizedSame(at, { ...w, side: 'sell' }, true), false);
@@ -1862,6 +1866,14 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     ]);
     // A difference under one smallest trade, with the bot able to fill it: left alone.
     assert.deepEqual(plan(ask, { listed: [listing(206, 'C', '8870')], pha: bal({ C: '8873' }) }).steps, [{ do: 'keep' }]);
+    // The edges: a difference of exactly one smallest trade lists it again, a hair less does not; an offer with exactly its
+    // smallest trade left can still be taken and is not used up, a hair less is.
+    const edge = hosted({ offers: [{ symbol: 'TAZ', total: '100', min: '5', max: '50', price: '1.08' }] });
+    assert.deepEqual(totals(plan(edge, { listed: [listing(1, 'TAZ', '30')], pha: bal({ TAZ: '35' }) })), ['35']);
+    assert.deepEqual(totals(plan(edge, { listed: [listing(1, 'TAZ', '30')], pha: bal({ TAZ: '34.99' }) })), ['keep']);
+    assert.deepEqual(totals(plan(edge, { listed: [listing(1, 'TAZ', '30')], pha: bal({ TAZ: '25' }) })), ['25'], 'downwards too');
+    assert.deepEqual(totals(plan(edge, { listed: [listing(1, 'TAZ', '30', '5')], pha: bal({ TAZ: '5' }) })), ['keep'], 'its smallest trade can still be taken');
+    assert.deepEqual(totals(plan(edge, { listed: [listing(1, 'TAZ', '30', '4.99')], pha: bal({ TAZ: '9' }) })), ['9']);
     // Less than its smallest trade left (the board no longer lists it): listed again, or cancelled when the bot has no more.
     assert.deepEqual(totals(plan(ask, { listed: [listing(206, 'C', '9000', '3')], pha: bal({ C: '7' }) })), ['7']);
     const gone = plan(ask, { listed: [listing(206, 'C', '9000', '3')], pha: bal({ C: '3' }) });
@@ -2195,6 +2207,51 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.deepEqual(open(kit2).map((o) => o.tazTotal), [tok('C', '37.75').toString(), tok('TAZ', '30').toString()]);
     await until(vt2, () => kit2.count('postOffer') >= 3, 'the buy offer, at the next look', { stepMs: 5_000, max: 80 });
     assert.equal((posts(kit2)[2] as OfferInput).total, '163.28');
+    s2.end.abort();
+    assert.equal(await drive(vt2, s2.p), SESSION_PAUSED);
+  });
+
+  test('the runner: what is left changed between the plan and the cancel, or the board shows a trade the bot has not kept yet: nothing is cancelled, and the next sync decides afresh', async () => {
+    // Between the look's first answer and the cancel a take came in and was accepted at once: no take waits, but less is left.
+    const vt = new VTime();
+    const kit = new FakeKit(vt.now);
+    await kit.postOffer(BID);
+    kit.calls.length = 0;
+    kit.usdc = usdcToRaw('160.016447');
+    const heartbeat = kit.board.heartbeat;
+    let asked = 0;
+    kit.board.heartbeat = async (id: number, token: string) => {
+      if (++asked === 2) kit.left.set(1, tok('C', '30'));
+      return heartbeat(id, token);
+    };
+    const cfg = hosted({ bids: SIZED.bids, sizeFromBalances: true, sizeEveryS: 600 });
+    const saved: number[] = [];
+    const s = session(kit, vt, cfg, saved);
+    await started(vt, saved);
+    assert.equal(asked, 2);
+    assert.equal(kit.count('cancelOffer'), 0, 'the plan was made for 37.75 C left: not carried out on 30');
+    await vt.advance(60_000);
+    assert.equal(kit.count('cancelOffer'), 1);
+    assert.ok(s.out.lines.includes('Offer #1 cancelled to list it again at what its mUSDC covers (it had 30 C left).'), s.out.lines.join('\n'));
+    s.end.abort();
+    assert.equal(await drive(vt, s.p), SESSION_PAUSED);
+    // The board shows an accepted trade on the offer that the bot's own records do not hold yet: what it still needs is
+    // not known, so the offer waits until the record is there.
+    const vt2 = new VTime();
+    const kit2 = new FakeKit(vt2.now);
+    await kit2.postOffer(BID);
+    kit2.calls.length = 0;
+    kit2.usdc = usdcToRaw('160.016447');
+    kit2.left.set(1, tok('C', '27.75'));
+    kit2.takes.set(1, [{ id: 99, status: 'accepted' }]);
+    const saved2: number[] = [];
+    const s2 = session(kit2, vt2, cfg, saved2);
+    await started(vt2, saved2);
+    assert.equal(kit2.count('cancelOffer'), 0);
+    assert.ok(s2.out.lines.some((l) => l.includes('1 waiting for a take\'s answer')), s2.out.lines.join('\n'));
+    kit2.trades = [{ id: 99, offerId: 1, role: 'B', maker: true, symbol: 'C', taz: tok('C', '10').toString(), usdc: usdcToRaw('9.8').toString(), myPha: kit2.address.pha, myBase: kit2.address.base.toLowerCase(), txs: {}, status: 'accepted' } as unknown as LocalTrade];
+    await vt2.advance(60_000);
+    assert.deepEqual(posts(kit2), [{ side: 'buy', symbol: 'C', total: '153.28', min: '2', max: '153.28', price: '0.98', acceptOnTheirOwn: true }], 'sized without the 9.8 USDC that trade still needs');
     s2.end.abort();
     assert.equal(await drive(vt2, s2.p), SESSION_PAUSED);
   });
