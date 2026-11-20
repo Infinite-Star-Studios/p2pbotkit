@@ -75,10 +75,13 @@ function asText(r: Reply): string {
       if (x.lastError) out.push(`  last failure: ${x.lastError} (tries again at ${x.retryAt})`);
       const a = x.address as { pha?: string; base?: string } | undefined;
       if (a) out.push(`  addresses: ${a.pha}, ${a.base}`);
-      if (Array.isArray(x.openOffers)) out.push(`  open offers: ${(x.openOffers as number[]).map((id) => `#${id}`).join(', ') || 'none'}`);
+      // Each open offer with the amount it was listed at, where the fleet gives it; else its number alone.
+      const listed = Array.isArray(x.listedOffers) ? (x.listedOffers as string[]) : Array.isArray(x.openOffers) ? (x.openOffers as number[]).map((id) => `#${id}`) : null;
+      if (listed) out.push(`  open offers: ${listed.join(', ') || 'none'}`);
       const z = x.sizing as { everyS?: number; lastLookAt?: string | null; nextLookAt?: string | null; lastLook?: string | null } | undefined;
       if (z) {
-        out.push(`  offers sized from the balances every ${z.everyS} s: ${z.lastLookAt ? `last look ${z.lastLookAt}, next ${z.nextLookAt}` : 'its next session looks'}`);
+        const next = z.nextLookAt ? `next ${z.nextLookAt}` : 'the next when it runs again (a start looks at once)';
+        out.push(`  offers sized from the balances every ${z.everyS} s: ${z.lastLookAt ? `last look ${z.lastLookAt}, ${next}` : 'no look kept: its next session looks'}`);
         if (z.lastLook) out.push(`  last look: ${z.lastLook}`);
       }
       if (Array.isArray(x.runningTrades)) out.push(`  running trades: ${(x.runningTrades as Array<{ id: number; status: string }>).map((t) => `#${t.id} (${t.status})`).join(', ') || 'none'}`);

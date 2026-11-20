@@ -20,7 +20,9 @@ function fake(o: { sized?: boolean } = {}): FleetApi & { calls: Array<[string, .
       const market = { name: 'market', network: 'mainnet', mode: 'running', since: '2026-11-18T00:00:00Z', secrets: 'set', openOffers: [3], runningTrades: [{ id: 40, status: 'pha_locked' }], lastLines: ['a line'] };
       // A bot with sizeFromBalances: one that has looked at its balances, and one whose next session will.
       const looked = { everyS: 3600, lastLookAt: '2026-11-18T01:00:00.000Z', nextLookAt: '2026-11-18T02:00:00.000Z', lastLook: 'Sized the offers from the balances: 1 listed again. The next look is in 3600 s.' };
-      return ok({ bots: o.sized ? [market, { ...market, name: 'sized', sizing: looked }, { ...market, name: 'new', sizing: { everyS: 600, lastLookAt: null, nextLookAt: null, lastLook: null } }] : [market] });
+      const fresh = { ...market, name: 'new', sizing: { everyS: 600, lastLookAt: null, nextLookAt: null, lastLook: null } };
+      const halted = { ...market, name: 'halted', mode: 'stopped', sizing: { ...looked, nextLookAt: null } };
+      return ok({ bots: o.sized ? [market, { ...market, name: 'sized', listedOffers: ['#6 buy 163.28 C', '#7 sell 9852.5 C'], sizing: looked }, fresh, halted] : [market] });
     },
     logs: (name, n) => { calls.push(['logs', name, n]); return ok({ lines: ['one', 'two'] }); },
     dryRun: async (name) => { calls.push(['dryRun', name]); return ok({ lines: ['Dry run done: nothing was sent.'] }); },
@@ -90,9 +92,11 @@ describe('the routes', () => {
     assert.match(s, /^market \(mainnet\): running since 2026-11-18T00:00:00Z/);
     assert.match(s, /open offers: #3/);
     assert.match(s, /running trades: #40 \(pha_locked\)/);
-    assert.equal(s.split('\n').filter((l) => l.includes('sized from the balances')).length, 2, 'only for a bot with the option');
+    assert.equal(s.split('\n').filter((l) => l.includes('offers sized from the balances every')).length, 3, 'only for a bot with the option');
+    assert.match(s, /^  open offers: #6 buy 163\.28 C, #7 sell 9852\.5 C$/m, 'each open offer with the amount it was listed at');
     assert.match(s, /^  offers sized from the balances every 3600 s: last look 2026-11-18T01:00:00\.000Z, next 2026-11-18T02:00:00\.000Z\n  last look: Sized the offers from the balances: 1 listed again\. The next look is in 3600 s\.$/m);
-    assert.match(s, /^  offers sized from the balances every 600 s: its next session looks$/m);
+    assert.match(s, /^  offers sized from the balances every 600 s: no look kept: its next session looks$/m);
+    assert.match(s, /^  offers sized from the balances every 3600 s: last look 2026-11-18T01:00:00\.000Z, the next when it runs again \(a start looks at once\)$/m, 'a bot that does not run names no next look');
     assert.match(await (await handle(req('/bots/market/start?text', { method: 'POST' }), TOKEN, f)).text(), /^Error: no yes/m);
     assert.match(await (await handle(req('/bots/market/halt?text', { method: 'POST' }), TOKEN, f)).text(), /halted\nRunning trades: #40/);
   });

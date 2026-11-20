@@ -324,6 +324,8 @@ describe('sessions: an alarm runs every running bot for SESSION_MS, then sets th
     const st = (w.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!;
     assert.deepEqual(st.sizing, { everyS: 3_600, lastLookAt: new Date(kept.lookedAt).toISOString(), nextLookAt: new Date(kept.lookedAt + 3_600_000).toISOString(), lastLook: kept.said });
     assert.deepEqual(st.offers, ['at most sell 30 TAZ (1 to 5 per trade) at 1.08 mUSDC'], 'the config\'s total is the most it lists');
+    assert.deepEqual(st.listedOffers, ['#1 sell 12.34 TAZ'], 'and status says what is listed');
+    assert.deepEqual(st.openOffers, [1]);
     // The balance fell meanwhile. Once the hour is over the look comes, once, and the offer is listed again at what the bot holds.
     kit.tokens.set('TAZ', tokenToRaw('TAZ', '8'));
     for (let i = 0; i < 3; i++) await session(w);
@@ -356,6 +358,8 @@ describe('sessions: an alarm runs every running bot for SESSION_MS, then sets th
     assert.equal(w5.kvMap.has('size:market'), true);
     // A halt, then a start: the start forgets the last look, so its first session looks (whatever moved meanwhile).
     await w5.fleet.halt('market');
+    const halted = (w5.fleet.status().body.bots as Array<{ sizing: { lastLookAt: string | null; nextLookAt: string | null } }>)[0]!.sizing;
+    assert.ok(halted.lastLookAt !== null && halted.nextLookAt === null, 'a bot that does not run names no next look');
     assert.equal((await w5.fleet.start('market')).status, 200);
     assert.equal(w5.kvMap.has('size:market'), false);
     const read = kit.reads.balances;

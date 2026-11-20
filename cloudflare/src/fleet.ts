@@ -46,10 +46,10 @@
  *   halt             stopped at once, its trades left where they are (as two Ctrl-C)
  * No call changes a config: the configs are bots.json, deployed with the Worker.
  */
-import { P2P_CONFIG, SqlBackend, networkProblem, type HostedKitOptions, type SqlDatabase } from '../../src/index.js';
+import { P2P_CONFIG, SqlBackend, networkProblem, tokenOf, type HostedKitOptions, type SqlDatabase } from '../../src/index.js';
 import { redact } from '../../src/redact.js';
 import {
-  parseHostedConfig, trade, printPreflight, dryRunRest, readOnlyTransports, explain, describeOffer, SESSION_PAUSED, SIZE_EVERY_S,
+  parseHostedConfig, trade, printPreflight, dryRunRest, readOnlyTransports, explain, describeOffer, plainAmount, SESSION_PAUSED, SIZE_EVERY_S,
   type BotKit, type HostedBotConfig, type SignalSource
 } from '../../examples/seller-bot.js';
 
@@ -227,6 +227,8 @@ interface Snapshot {
   at: number;
   address: { pha: string; base: string };
   openOffers: number[];
+  /** Each open offer in words, with the amount it was listed at ("#6 buy 163.28 C"). */
+  listed: string[];
   trades: Array<{ id: number; status: string }>;
 }
 
@@ -533,6 +535,8 @@ export class Fleet {
         at: this.#host.now(),
         address: { pha: kit.address.pha, base: kit.address.base },
         openOffers: offers.filter((o) => o.closedAt == null).map((o) => o.id),
+        // Each open offer with the amount it was listed at: with sizeFromBalances that is not the config's total.
+        listed: offers.filter((o) => o.closedAt == null).map((o) => `#${o.id} ${o.side} ${plainAmount(BigInt(o.tazTotal), tokenOf(o.symbol)?.decimals ?? 0)} ${o.symbol}`),
         trades: trades.filter((t) => !t.endedAt).map((t) => ({ id: t.id, status: t.status ?? 'new' }))
       });
     } catch { /* status shows the previous one */ }
@@ -621,9 +625,10 @@ export class Fleet {
         secrets: this.#secretsProblem(d) ?? 'set',
         // With sizeFromBalances an entry's total is the most it lists, not what is listed.
         offers: d.cfg ? d.cfg.offers.map((w) => `${d.cfg!.sizeFromBalances === true ? 'at most ' : ''}${describeOffer(w, usdcOf(d.cfg!))}`) : [],
-        ...(d.cfg?.sizeFromBalances === true && !d.orphan ? { sizing: this.#sizing(d.name, d.cfg) } : {}),
+        // The next look is named only for a bot that runs: a stopped one has no session, and a start looks at once.
+        ...(d.cfg?.sizeFromBalances === true && !d.orphan ? { sizing: { ...this.#sizing(d.name, d.cfg), ...(st.mode === 'running' ? {} : { nextLookAt: null }) } } : {}),
         ...(snap ? {
-          address: snap.address, openOffers: snap.openOffers, runningTrades: snap.trades,
+          address: snap.address, openOffers: snap.openOffers, listedOffers: snap.listed, runningTrades: snap.trades,
           seenAt: new Date(snap.at).toISOString()
         } : {}),
         lastLines: (this.#logs.get(d.name) ?? []).slice(-20)

@@ -1842,6 +1842,12 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.equal(sizedSame(at, { ...w, side: 'sell' }, true), false);
     assert.equal(sizedSame(kept({ ...w, total: '163.28', max: '100' }), w, true), false, 'another largest trade than the bot would list');
     assert.equal(sizedSame(kept(sizedOffer(f, tok('RA', '3'))), f, true), true, 'a following offer with its amount per day lowered');
+    // Two entries that differ in their total alone: a listing of 10 fits both, one of 30 only the larger. Each keeps its own,
+    // whatever the order the store gives them in (the first fit would hand the 30 entry the 10, and the 30 would be no entry's).
+    const big: OfferInput = { side: 'sell', ...SELL_TAZ };
+    const little: OfferInput = { side: 'sell', ...SELL_TAZ, total: '10' };
+    assert.equal(sizedSame(kept(little, 2), big, true), true);
+    assert.equal(sizedSame(kept(big, 3), little, true), false);
     const noDay: OfferInput = { side: 'sell', symbol: 'RA', total: '6', min: '1', max: '2', follow: { offsetBps: 200, limitPrice: '1.90' } };
     assert.equal(sizedSame(kept(sizedOffer(noDay, tok('RA', '3'))), noDay, true), true, 'one without an amount per day: the kit set it to the listed total');
   });
@@ -1893,6 +1899,10 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.deepEqual(plan(small, { listed: [listing(208, 'C', '37.36')], usdc: '160.016447' }), { steps: [{ do: 'keep', more: tok('C', '163.28') }], complete: true });
     assert.deepEqual(plan(small, { listed: [listing(208, 'C', '37.36')], usdc: '38' }), { steps: [{ do: 'keep' }], complete: true }, 'under one smallest trade more: nothing to say');
     assert.deepEqual(plan(small, { usdc: '160.016447' }).steps, [{ do: 'list', offer: small.offers[0], more: tok('C', '163.28') }]);
+    // A total written with more decimals than the rounding keeps is listed as it is written, when the bot holds that much.
+    const fine = hosted({ offers: [{ symbol: 'C', total: '37.365', min: '2.05', max: '37.365', price: '1.03' }] });
+    assert.deepEqual(plan(fine, { pha: bal({ C: '9999' }) }).steps, [{ do: 'list', offer: fine.offers[0], more: tok('C', '9999') }]);
+    assert.deepEqual(totals(plan(fine, { pha: bal({ C: '37.3649' }) })), ['37.36']);
     // A smallest trade written with more decimals than the rounding keeps: the smallest trade itself, when the bot holds it.
     assert.deepEqual(totals(plan(hosted({ offers: [{ symbol: 'C', total: '100', min: '1.005', max: '100', price: '1.03' }] }), { pha: bal({ C: '1.0099' }) })), ['1.005']);
   });
@@ -1905,7 +1915,7 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.deepEqual(plan(bid, { listed: [listing(208, 'C', '37.36', null)], usdc: '160' }), { steps: [{ do: 'keep' }], complete: false }, 'the board did not say what is left');
     assert.deepEqual(plan(bid, { listed: [listing(208, 'C', '37.36')], usdc: null }), { steps: [{ do: 'keep' }], complete: false });
     const unread = plan(bid, { usdc: null });
-    assert.equal(unread.complete, false);
+    assert.equal(unread.complete, true, 'an entry without a listing is tried again on its own: it does not make the others\' look unfinished');
     assert.match(whyOf(unread), /its mUSDC balance could not be read/);
     assert.match(whyOf(plan(bid, { usdc: '160', pha: null })), /its Phantasma balances could not be read/, 'a buyer\'s KCAL is read on Phantasma');
     assert.match(whyOf(plan(hosted({ offers: [SELL_C] }), { pha: null })), /its Phantasma balances could not be read/);
@@ -1916,9 +1926,20 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     const daily = hosted({ offers: [{ symbol: 'RA', total: '6', min: '1', max: '2', follow: { offsetBps: 200, limitPrice: '1.90', dailyMax: '3' } }] });
     const day = plan(daily, { listed: [listing(1, 'RA', '6')], pha: bal({ RA: '2' }) });
     assert.equal(day.steps[0]!.do, 'keep');
-    assert.match(whyOf(day), /it has an amount per day \(dailyMax\), and a new listing would start its 24 hours again; to list it again, change its entry in the config/);
+    assert.match(whyOf(day), /it has an amount per day \(dailyMax\), and a new listing would start its 24 hours again; to list it again, stop the bot and start it, or change the entry's min, limitPrice or offsetBps/);
     assert.deepEqual(plan(daily, { listed: [listing(1, 'RA', '6')], pha: bal({ RA: '6' }) }), { steps: [{ do: 'keep' }], complete: true }, 'nothing to say while nothing would change');
     assert.deepEqual(plan(daily, { pha: bal({ RA: '2' }) }).steps, [{ do: 'list', offer: { side: 'sell', symbol: 'RA', total: '2', min: '1', max: '2', follow: { offsetBps: 200, limitPrice: '1.90', dailyMax: '2' } } }], 'listed at what it holds when it is listed');
+    // A listing that a look leaves as it is whatever the balances say (an amount per day, or paused) keeps its part of
+    // the balance ahead of an entry that stands before it in the config: 13 USDC are not promised twice.
+    const pair = hosted({ bids: [{ symbol: 'C', total: '150', min: '2.05', max: '150', price: '0.98' }, { symbol: 'C', total: '100', min: '2', max: '100', follow: { offsetBps: 0, limitPrice: '1.00', dailyMax: '50' } }] });
+    const kept13 = plan(pair, { listed: [null, listing(2, 'C', '13')], usdc: '13' });
+    assert.deepEqual(totals(kept13), ['none', 'keep']);
+    assert.equal(whyOf(kept13), 'this bot\'s Base address holds 13 mUSDC, of which 0 mUSDC are free for this offer, less than the smallest trade needs (2.009 mUSDC)');
+    assert.deepEqual(totals(plan(pair, { listed: [listing(1, 'C', '13.26'), listing(2, 'C', '13')], usdc: '13' })), ['unlist', 'keep'], 'and an earlier listing gives way to it');
+    assert.deepEqual(totals(plan(pair, { listed: [null, listing(2, 'C', '13')], usdc: '20' })), ['7.14', 'keep'], '7 USDC are free: 7.14 C at 0.98');
+    assert.deepEqual(totals(plan(pair, { listed: [listing(1, 'C', '3'), listing(2, 'C', '13')], usdc: '15.5' })), ['2.55', 'keep'], '3 C would take 2.94 of the 2.5 USDC that are left for it: listed again, though 2.55 is under one smallest trade away');
+    const pausedPair = hosted({ offers: [SELL_TAZ, { symbol: 'TAZ', total: '30', min: '1', max: '5', follow: { offsetBps: 0, limitPrice: '1.00' } }] });
+    assert.deepEqual(totals(plan(pausedPair, { listed: [null, listing(2, 'TAZ', '30', '30', 'paused')], pha: bal({ TAZ: '40' }) })), ['10', 'keep']);
     // What is missing is listed from what the others leave: their own remaining when the board said it, else their total.
     const two = hosted({ offers: [SELL_TAZ, { ...SELL_TAZ, price: '1.20' }] });
     assert.deepEqual(totals(plan(two, { listed: [listing(1, 'TAZ', '30', null), null], pha: bal({ TAZ: '50' }), look: false })), ['keep', '20']);
@@ -2322,8 +2343,37 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     await vt4.advance(120_000);
     assert.deepEqual(posts(kit4).map((o) => (o as OfferInput).symbol), ['TAZ', 'C', 'TAZ']);
     assert.equal(open(kit4).length, 2);
+    assert.ok(!s4.out.lines.some((l) => /could not be read|could not be sized/.test(l)), `nothing was unread while the entry was held: ${s4.out.lines.join(' | ')}`);
     s4.end.abort();
     assert.equal(await drive(vt4, s4.p), SESSION_PAUSED);
+    // The held entry is the buy offer, and meanwhile only the sell offer needs a listing (the board closed it): the
+    // USDC is read all the same, so nothing is said of a balance that could not be read.
+    const vt5 = new VTime();
+    const kit5 = new FakeKit(vt5.now);
+    kit5.held.set('TAZ', tok('TAZ', '30'));
+    kit5.usdc = usdcToRaw('100');
+    const post5 = kit5.postOffer.bind(kit5);
+    let lost5 = true;
+    kit5.postOffer = async (o: OfferInput) => {
+      if (o.side !== 'buy' || !lost5) return post5(o);
+      lost5 = false;
+      kit5.calls.push({ fn: 'postOffer', arg: o, at: vt5.now() });
+      throw new CreateError(new BoardError('NETWORK', 0, true), { kind: 'offer', tokenHash: 'ef'.repeat(32), mayExist: true });
+    };
+    const saved5: number[] = [];
+    const s5 = session(kit5, vt5, hosted({ ...SIZED, sizeEveryS: 3600 }), saved5);
+    await started(vt5, saved5);
+    assert.deepEqual(posts(kit5).map((o) => (o as OfferInput).symbol), ['TAZ', 'C']);
+    kit5.offers[0]!.closedAt = vt5.now();
+    const funds = kit5.reads.readFunds;
+    await vt5.advance(60_000);
+    assert.deepEqual(posts(kit5).map((o) => (o as OfferInput).symbol), ['TAZ', 'C', 'TAZ'], 'the sell offer listed again; the buy offer still held');
+    assert.equal(kit5.reads.readFunds, funds + 1);
+    assert.ok(!s5.out.lines.some((l) => /could not be read|could not be sized/.test(l)), s5.out.lines.join(' | '));
+    await vt5.advance(120_000);
+    assert.equal(open(kit5).length, 2, 'and listed once the two minutes are over');
+    s5.end.abort();
+    assert.equal(await drive(vt5, s5.p), SESSION_PAUSED);
     // Too little for the smallest trade: said once, and read again only every 5 minutes.
     const vt2 = new VTime();
     const kit2 = new FakeKit(vt2.now);
@@ -2434,6 +2484,136 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.deepEqual(said3, ['Sized the offers from the balances: 1 left as listed. The config\'s total is the limit for: buy C (its total is 37.75 C; its mUSDC covers 163.28 C). Raise total and max there to list more. The next look is in 3600 s.']);
     s3.end.abort();
     assert.equal(await drive(vt3, s3.p), SESSION_PAUSED);
+  });
+
+  test('the runner: two entries that differ in their total alone keep their own listings; one entry the board refuses does not hold the others back', async () => {
+    // Sell 30 TAZ and sell 10 TAZ at one price. After a sale the larger is listed again under a higher number than the
+    // smaller: each still keeps its own, look after look.
+    const vt = new VTime();
+    const kit = new FakeKit(vt.now);
+    kit.held.set('TAZ', tok('TAZ', '45'));
+    const two = hosted({ offers: [SELL_TAZ, { ...SELL_TAZ, total: '10' }], sizeFromBalances: true, sizeEveryS: 600 });
+    const saved: number[] = [];
+    const s = session(kit, vt, two, saved);
+    await started(vt, saved);
+    assert.deepEqual(posts(kit).map((o) => (o as OfferInput).total), ['30', '10']);
+    kit.left.set(1, tok('TAZ', '25'));
+    kit.held.set('TAZ', tok('TAZ', '40'));
+    for (let i = 0; i < 36; i++) await vt.advance(60_000);
+    assert.deepEqual(posts(kit).map((o) => (o as OfferInput).total), ['30', '10', '30'], 'the larger one listed again, once');
+    assert.deepEqual(kit.calls.filter((c) => c.fn === 'cancelOffer').map((c) => c.arg), [1]);
+    assert.deepEqual(open(kit).map((o) => o.id), [2, 3]);
+    assert.ok(s.out.lines.includes('Offer #1 cancelled to list it again at its total (it had 25 TAZ left).'), s.out.lines.join('\n'));
+    s.end.abort();
+    assert.equal(await drive(vt, s.p), SESSION_PAUSED);
+    // The board refuses the first entry for that offer's own sake (its smallest trade is above the maker's share):
+    // the entries after it are listed all the same, and one that is listed is sized in the same look.
+    const vt2 = new VTime();
+    const kit2 = new FakeKit(vt2.now);
+    await kit2.postOffer(BID);
+    kit2.calls.length = 0;
+    kit2.held.set('TAZ', tok('TAZ', '30'));
+    kit2.held.set('RA', tok('RA', '6'));
+    kit2.usdc = usdcToRaw('160.016447');
+    const post = kit2.postOffer.bind(kit2);
+    let refusal: Error = new BoardError('CAP_SHARE', 409, false);
+    kit2.postOffer = async (o: OfferInput) => {
+      if (o.symbol !== 'RA') return post(o);
+      kit2.calls.push({ fn: 'postOffer', arg: o, at: vt2.now() });
+      throw refusal;
+    };
+    const three = hosted({ offers: [{ symbol: 'RA', total: '6', min: '1', max: '2', price: '2.05' }, SELL_TAZ], bids: SIZED.bids, sizeFromBalances: true, sizeEveryS: 3600 });
+    const saved2: number[] = [];
+    const said2: string[] = [];
+    const s2 = session(kit2, vt2, three, saved2, said2);
+    await started(vt2, saved2);
+    assert.deepEqual(open(kit2).map((o) => `${o.side} ${o.symbol} ${o.tazTotal}`), [`sell TAZ ${tok('TAZ', '30')}`, `buy C ${tok('C', '163.28')}`], 'TAZ listed and the buy offer sized, though RA was refused first');
+    assert.equal(said2[0], 'Sized the offers from the balances: 1 listed again, 1 listed, 1 not listed (the listing failed; the bot tries again at its next syncs). The next look is in 3600 s.');
+    s2.end.abort();
+    assert.equal(await drive(vt2, s2.p), SESSION_PAUSED);
+    // A listing that fails for more than its own offer's sake (the board is away): nothing is cancelled after it in that look.
+    const vt3 = new VTime();
+    const kit3 = new FakeKit(vt3.now);
+    await kit3.postOffer(BID);
+    kit3.calls.length = 0;
+    kit3.held.set('RA', tok('RA', '6'));
+    kit3.usdc = usdcToRaw('160.016447');
+    const post3 = kit3.postOffer.bind(kit3);
+    kit3.postOffer = async (o: OfferInput) => {
+      if (o.symbol !== 'RA') return post3(o);
+      throw new BoardError('UNAVAILABLE', 503, true);
+    };
+    kit3.held.set('TAZ', tok('TAZ', '30'));
+    const saved3: number[] = [];
+    const s3 = session(kit3, vt3, hosted({ offers: [{ symbol: 'RA', total: '6', min: '1', max: '2', price: '2.05' }, SELL_TAZ], bids: SIZED.bids, sizeFromBalances: true, sizeEveryS: 3600 }), saved3);
+    await started(vt3, saved3);
+    assert.equal(kit3.count('cancelOffer'), 0, 'the buy offer stays listed as it is');
+    assert.deepEqual(open(kit3).map((o) => `${o.side} ${o.symbol}`), ['buy C', 'sell TAZ'], 'an entry without a listing is still tried, and listed');
+    s3.end.abort();
+    assert.equal(await drive(vt3, s3.p), SESSION_PAUSED);
+    // A listing that fails right after its own cancel, though for that offer's own sake: one offer is gone already, so
+    // nothing more is cancelled in that look.
+    const vt4 = new VTime();
+    const kit4 = new FakeKit(vt4.now);
+    await kit4.postOffer({ side: 'sell', ...SELL_TAZ, total: '10' });
+    await kit4.postOffer(BID);
+    kit4.calls.length = 0;
+    kit4.held.set('TAZ', tok('TAZ', '30'));
+    kit4.usdc = usdcToRaw('160.016447');
+    kit4.postOffer = async () => { throw new BoardError('AMOUNT', 409, false); };
+    const saved4: number[] = [];
+    const s4 = session(kit4, vt4, hosted(SIZED), saved4);
+    await started(vt4, saved4);
+    assert.deepEqual(kit4.calls.filter((c) => c.fn === 'cancelOffer').map((c) => c.arg), [1], 'the sell offer was cancelled for its new size; the buy offer is left listed');
+    s4.end.abort();
+    assert.equal(await drive(vt4, s4.p), SESSION_PAUSED);
+  });
+
+  test('the runner: a balance that cannot be read for an entry without a listing is tried again every 5 minutes and leaves the others\' look alone; a lock of the bot\'s own on its way holds a buy offer\'s sizing', async () => {
+    // The sell offer is listed; the buy offer is not, and the Base RPC fails.
+    const vt = new VTime();
+    const kit = new FakeKit(vt.now);
+    await kit.postOffer({ side: 'sell', ...SELL_TAZ });
+    kit.calls.length = 0;
+    kit.held.set('TAZ', tok('TAZ', '30'));
+    kit.failing = new Set(['readFunds']);
+    const saved: number[] = [];
+    const s = session(kit, vt, hosted({ ...SIZED, sizeEveryS: 3600 }), saved);
+    await started(vt, saved);
+    assert.equal(saved.length, 1);
+    about(saved[0], ranAt(kit), 'the look of the sell offer is done: its next one comes a whole sizeEveryS later');
+    assert.ok(s.out.lines.includes('Not listing buy 1000 C (2 to 1000 per trade) at 0.98 mUSDC now: its mUSDC balance could not be read.'), s.out.lines.join('\n'));
+    assert.deepEqual(kit.reads, { balances: 1, readFunds: 1, heartbeat: 1 });
+    for (let i = 0; i < 4; i++) await vt.advance(60_000);
+    assert.deepEqual(kit.reads, { balances: 1, readFunds: 1, heartbeat: 1 }, 'four syncs later: nothing read again');
+    kit.failing = new Set();
+    kit.usdc = usdcToRaw('50');
+    await until(vt, () => kit.count('postOffer') >= 1, 'the buy offer listed', { stepMs: 5_000, max: 40 });
+    assert.equal((posts(kit)[0] as OfferInput).total, '51.02');
+    assert.equal(saved.length, 1, 'the timed look was not moved');
+    s.end.abort();
+    assert.equal(await drive(vt, s.p), SESSION_PAUSED);
+    // The bot's own USDC lock for a trade was sent and is not reported yet: its USDC may or may not have left the balance,
+    // so the buy offer waits; once the lock is reported it is sized.
+    const vt2 = new VTime();
+    const kit2 = new FakeKit(vt2.now);
+    await kit2.postOffer(BID);
+    kit2.calls.length = 0;
+    kit2.left.set(1, tok('C', '27.75'));
+    kit2.usdc = usdcToRaw('27.2');
+    const lock = { id: 77, offerId: 1, role: 'B', maker: true, symbol: 'C', taz: tok('C', '10').toString(), usdc: usdcToRaw('9.8').toString(), myPha: kit2.address.pha, myBase: kit2.address.base.toLowerCase(), txs: { baseLock: `0x${'55'.repeat(32)}` }, status: 'pha_locked' };
+    kit2.trades = [lock as unknown as LocalTrade];
+    const saved2: number[] = [];
+    const s2 = session(kit2, vt2, hosted({ bids: SIZED.bids, sizeFromBalances: true, sizeEveryS: 600 }), saved2);
+    await started(vt2, saved2);
+    assert.equal(kit2.count('cancelOffer'), 0, 'not cancelled on figures that count its 9.8 USDC twice');
+    assert.ok(s2.out.lines.some((l) => l.startsWith('Offer #1 is not sized now:')), s2.out.lines.join('\n'));
+    kit2.trades = [{ ...lock, status: 'base_locked' } as unknown as LocalTrade];
+    await vt2.advance(60_000);
+    assert.equal(kit2.count('cancelOffer'), 0, '27.2 USDC cover the 27.75 C that are left: nothing to change');
+    assert.ok(s2.out.lines.some((l) => l.startsWith('Every offer is sized now.')), s2.out.lines.join('\n'));
+    s2.end.abort();
+    assert.equal(await drive(vt2, s2.p), SESSION_PAUSED);
   });
 
   test('the runner: a stop during a look lists nothing after the cancel; without the option on, no balance of a listed offer is ever read', async () => {

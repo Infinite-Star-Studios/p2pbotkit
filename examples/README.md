@@ -157,9 +157,11 @@ rounded down to hundredths of a token. `total` is then the most the offer
 ever lists and `max` the most one trade takes; `max` is lowered to the
 listed amount when that is smaller, and under `min` nothing is listed. So a
 `total` written for the balance of one day lets the offer shrink and never
-grow: set `total` and `max` to the most you would ever want listed. One
-offer holds at most 100,000 C, 10,000 RA, 10,000,000 TAZ, 100,000,000 SOUL
-or 300,000,000 KCAL, and one trade costs at most 10,000 USDC on mainnet.
+grow: set `total` to the most you would ever want listed, and `max` to the
+most one trade may take. One offer holds at most 100,000 C, 10,000 RA,
+10,000,000 TAZ, 100,000,000 SOUL or 300,000,000 KCAL; one trade takes at
+most 10,000 C, 5,000 RA, 100,000 TAZ, 1,000,000 SOUL or 30,000,000 KCAL,
+and costs at most 10,000 USDC on mainnet.
 When an entry's own `total` is what holds an offer under what the bot could
 list, the bot says so at each look.
 
@@ -170,7 +172,9 @@ balances and asks the board what is left of each offer. It lists an offer
 again when the offer promises more than the bot could fill, when it has less
 than its smallest trade left, or when it differs from what the bot could
 list by one smallest trade or more. A sale lowers what is left of an offer
-and the balance alike, so by itself it changes nothing. Between two looks
+and the balance alike, so by itself it changes nothing, unless the bot holds
+more than the entry's `total`: the next look then fills the offer up to its
+`total` again, under a new number. Between two looks
 the bot reads no balance for an offer that is listed; an offer that its own
 trades have used up is looked at within a minute. Each look ends with one
 sentence that starts "Sized the offers from the balances" and says when the
@@ -182,11 +186,13 @@ trades still need and without one order of each recurring order (`take`)
 that spends the same balance. It lists no sell offer while it holds less
 than 1.1 SOUL, or less KCAL than a lock's gas may take (3 KCAL), and no buy
 offer while it holds less than 3 KCAL (a buyer claims its tokens with them)
-or no ETH on Base. `holdBack` holds more back: with `{"USDC": "20"}` the
-last 20 USDC never go into a buy offer. An entry that sells KCAL or SOUL
-needs its `holdBack` (`"0"` for none): the bot pays the gas of every
-Phantasma transaction in KCAL, and an offer sized from the balance would
-sell it down to what one lock needs.
+or no ETH on Base. `holdBack` holds more back when an offer is sized: with
+`{"USDC": "20"}` a buy offer is sized from the USDC without the last 20. It
+is not a limit on trades: an offer that is listed can still spend them when
+the USDC falls for another reason, until the next look. An entry that sells
+KCAL or SOUL needs its `holdBack` (`"0"` for none): the bot pays the gas of
+every Phantasma transaction in KCAL, and an offer sized from the balance
+would sell it down to what one lock needs.
 
 Sell offers of one token share that token's balance, and every buy offer
 shares the USDC, in the config's order: the first lists what it asks for,
@@ -194,10 +200,18 @@ the next what is left.
 
 - An offer a take is waiting on is not cancelled, since the cancel would
   cancel that take: the bot looks at it again a minute later, three times
-  at most.
+  at most in one run (a host that runs the bot in sessions, as Cloudflare
+  does, starts that count again with each session).
 - An offer that follows the reference price with a `dailyMax` is sized when
   it is listed and never listed again by a look: a new listing would start
-  its 24 hours again. To list it again, change its entry.
+  its 24 hours again. It keeps its part of the balance ahead of the other
+  offers. To list it again, stop the bot and start it, or change the
+  entry's `min`, `limitPrice` or `offsetBps` (a higher `total`, `max` or
+  `dailyMax` alone leaves the listing as it is).
+- When the board, or the kit, refuses to list one entry for that offer's
+  own sake, the others are listed and sized as usual. After a listing that
+  failed because the board was away or limited the bot, or right after its
+  own cancel, the bot cancels nothing more in that look.
 - Each time an offer is listed again, the store keeps the record of the
   closed one.
 - Before you turn the option off, put each `total` back to an amount the

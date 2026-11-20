@@ -203,15 +203,17 @@ address.
 - **Offers sized from the balances** (the bot lists an offer again, at
   another size, when its balance has changed): in the bot's entry of
   `bots.json` set `"sizeFromBalances": true`, and set each offer's `total`
-  and `max` to the most it should ever list (`../examples/README.md`,
-  "Offers sized from the balances", has the rules). Then
+  to the most it should ever list and its `max` to the most one trade may
+  take (`../examples/README.md`, "Offers sized from the balances", has the
+  rules and the limits). Then
   `npm run check-config`, which now says `lists at most:` for each offer,
   and `npm run deploy`. The first session after a start, and after a deploy
   that changed an offer or `holdBack`, looks at the balances at once. After
   that the bot looks every `sizeEveryS` seconds (an hour unless you set
   it): the object keeps the time of the last look, so a new session every
   6 minutes does not look again. `status` shows the last look, what it
-  said, and the next one. An offer whose size changes is cancelled and
+  said, the next one, and each open offer with the amount it was listed
+  at. An offer whose size changes is cancelled and
   listed under a new number. Before you set the option back to `false`,
   put each `total` back to an amount the bot holds: without the option
   every offer is listed at its `total` as written.
