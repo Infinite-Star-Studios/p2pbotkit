@@ -161,9 +161,11 @@ grow: set `total` to the most you would ever want listed, and `max` to the
 most one trade may take. One offer holds at most 100,000 C, 10,000 RA,
 10,000,000 TAZ, 100,000,000 SOUL or 300,000,000 KCAL; one trade takes at
 most 100,000 C, 5,000 RA, 100,000 TAZ, 1,000,000 SOUL or 30,000,000 KCAL,
-and costs at most 100,000 USDC.
-When an entry's own `total` is what holds an offer under what the bot could
-list, the bot says so at each look.
+and costs at most 100,000 USDC (for an offer that follows the reference
+price: 1,000 USDC at its limit price on mainnet, 10,000 on devnet). To list
+more of a token than one offer holds, write a second entry for it.
+When an entry's own `total` is what keeps the bot from listing more, the
+bot says so at each look, with what it could list more.
 
 The board cannot change the amounts of an open offer, so another size is a
 cancel and a new listing: the offer is listed again under a new number.
@@ -196,7 +198,8 @@ would sell it down to what one lock needs.
 
 Sell offers of one token share that token's balance, and every buy offer
 shares the USDC, in the config's order: the first lists what it asks for,
-the next what is left.
+the next what is left. So after a sale from an earlier one, the next look
+fills that one up again and lists the later ones again at what is left.
 
 - An offer a take is waiting on is not cancelled, since the cancel would
   cancel that take: the bot looks at it again a minute later, three times

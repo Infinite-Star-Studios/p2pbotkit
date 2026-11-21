@@ -1896,12 +1896,25 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.equal(whyOf(dry), 'this bot\'s Base address holds 1.99 mUSDC, less than the smallest trade needs (2.009 mUSDC)');
     // The entry's own total is the limit, and the bot could list at least one smallest trade more: the plan says how much (for the bot's sentence).
     const small = hosted({ bids: [{ ...BUY_C, total: '37.36', max: '37.36' }] });
-    assert.deepEqual(plan(small, { listed: [listing(208, 'C', '37.36')], usdc: '160.016447' }), { steps: [{ do: 'keep', more: tok('C', '163.28') }], complete: true });
+    assert.deepEqual(plan(small, { listed: [listing(208, 'C', '37.36')], usdc: '160.016447' }), { steps: [{ do: 'keep', more: tok('C', '125.92') }], complete: true }, '123.40 USDC stay out of the offer: 125.92 C more at 0.98');
     assert.deepEqual(plan(small, { listed: [listing(208, 'C', '37.36')], usdc: '38' }), { steps: [{ do: 'keep' }], complete: true }, 'under one smallest trade more: nothing to say');
-    assert.deepEqual(plan(small, { usdc: '160.016447' }).steps, [{ do: 'list', offer: small.offers[0], more: tok('C', '163.28') }]);
+    assert.deepEqual(plan(small, { usdc: '160.016447' }).steps, [{ do: 'list', offer: small.offers[0], more: tok('C', '125.92') }]);
+    // A total that is the most one offer holds cannot be raised: the plan says so, and another entry lists the rest.
+    // With entries enough for all the bot holds, nothing is left to say. (Mainnet: one C trade takes up to 100,000 C
+    // and 100,000 USDC since kit 0.3.1.)
+    const most = { symbol: 'C', total: '100000', min: '5', max: '97000', price: '1.03' };
+    const onMainnet = (offers: unknown[], held: string) => {
+      const cfg = parseHostedConfig({ network: 'mainnet', offers }, { apiKey: false });
+      return planSizes({ network: 'mainnet', offers: cfg.offers, take: [], listed: cfg.offers.map(() => null), look: cfg.offers.map(() => false), pha: bal({ C: held }), base: null, trades: [], kept: [], address: ADDR, holdBack: {}, usdcSymbol: 'USDC' }).steps;
+    };
+    assert.deepEqual(onMainnet([most], '209852.5'), [{ do: 'list', offer: { side: 'sell', ...most }, more: tok('C', '109852.5'), atMost: true }]);
+    assert.deepEqual(onMainnet([most, most, most], '209852.5').map((x) => (x.do === 'list' ? `${x.offer.total}/${x.offer.max}${x.more === undefined ? '' : ' more'}` : x.do)), ['100000/97000', '100000/97000', '9852.5/9852.5']);
+    assert.throws(() => parseHostedConfig({ network: 'mainnet', offers: [{ ...most, max: '100000' }] }, { apiKey: false }), /At this price the largest trade is over 100,000 USDC/);
+    assert.throws(() => parseHostedConfig({ network: 'mainnet', offers: [{ ...most, total: '100000.5' }] }, { apiKey: false }), /One offer holds at most 100,000 C/);
+    assert.equal(parseHostedConfig({ network: 'mainnet', bids: [{ symbol: 'C', total: '100000', min: '2.05', max: '100000', price: '0.98' }] }, { apiKey: false }).offers.length, 1);
     // A total written with more decimals than the rounding keeps is listed as it is written, when the bot holds that much.
     const fine = hosted({ offers: [{ symbol: 'C', total: '37.365', min: '2.05', max: '37.365', price: '1.03' }] });
-    assert.deepEqual(plan(fine, { pha: bal({ C: '9999' }) }).steps, [{ do: 'list', offer: fine.offers[0], more: tok('C', '9999') }]);
+    assert.deepEqual(plan(fine, { pha: bal({ C: '9999' }) }).steps, [{ do: 'list', offer: fine.offers[0], more: tok('C', '9961.63') }]);
     assert.deepEqual(totals(plan(fine, { pha: bal({ C: '37.3649' }) })), ['37.36']);
     // A smallest trade written with more decimals than the rounding keeps: the smallest trade itself, when the bot holds it.
     assert.deepEqual(totals(plan(hosted({ offers: [{ symbol: 'C', total: '100', min: '1.005', max: '100', price: '1.03' }] }), { pha: bal({ C: '1.0099' }) })), ['1.005']);
@@ -2481,7 +2494,7 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     const s3 = session(kit3, vt3, hosted({ bids: [{ symbol: 'C', total: '37.75', min: '2', max: '37.75', price: '0.98' }], sizeFromBalances: true }), saved3, said3);
     await started(vt3, saved3);
     assert.equal(kit3.count('cancelOffer') + kit3.count('postOffer'), 0);
-    assert.deepEqual(said3, ['Sized the offers from the balances: 1 left as listed. The config\'s total is the limit for: buy C (its total is 37.75 C; its mUSDC covers 163.28 C). Raise total and max there to list more. The next look is in 3600 s.']);
+    assert.deepEqual(said3, ['Sized the offers from the balances: 1 left as listed. Not listed because of the config: buy C (its total is 37.75 C, and the bot could list 125.53 C more: raise its total and max). The next look is in 3600 s.']);
     s3.end.abort();
     assert.equal(await drive(vt3, s3.p), SESSION_PAUSED);
   });

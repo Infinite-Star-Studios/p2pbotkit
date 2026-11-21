@@ -199,7 +199,12 @@ address.
   starts with the new config, which keeps listed what it lists and cancels
   what it no longer lists, as a restart does on a machine.
 - **A new kit version:** `git pull` in the kit's folder, `npm ci
-  --ignore-scripts` in both folders, then `npm run deploy` here.
+  --ignore-scripts` in both folders, then `npm run deploy` here. The deploy
+  is the whole upgrade: the next session runs the new version, with no new
+  start (and so no preflight; `dry-run` shows one for a stopped bot). When
+  a version changes what the kit locks (0.3.1: C's bounds), deploy it
+  without delay: a bot on the old version still accepts such a take and
+  then refuses to lock it, which counts as its no-show.
 - **Offers sized from the balances** (the bot lists an offer again, at
   another size, when its balance has changed): in the bot's entry of
   `bots.json` set `"sizeFromBalances": true`, and set each offer's `total`

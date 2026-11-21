@@ -659,16 +659,18 @@ export interface SizedListing {
 
 /**
  * What a sizing does with one config entry (planSizes). `more`: raw units
- * the bot could list for this entry were its `total` not the limit (set when
- * that is at least one smallest trade above the total).
+ * of its token that no entry lists though the bot could (at least one
+ * smallest trade), because this entry is at its `total`; set on the first
+ * such entry of a balance. `atMost`: that total is the most one offer holds,
+ * so only another entry can list them.
  */
 export type SizeStep =
   /** Listed, and left as it is; `why` when the bot would have listed it again but does not. */
-  | { do: 'keep'; why?: string; more?: bigint }
+  | { do: 'keep'; why?: string; more?: bigint; atMost?: boolean }
   /** Not listed: list this. */
-  | { do: 'list'; offer: OfferInput; more?: bigint }
+  | { do: 'list'; offer: OfferInput; more?: bigint; atMost?: boolean }
   /** Cancel offer `id`, which has `left` left, then list this. */
-  | { do: 'relist'; id: number; left: bigint; offer: OfferInput; more?: bigint }
+  | { do: 'relist'; id: number; left: bigint; offer: OfferInput; more?: bigint; atMost?: boolean }
   /** Cancel offer `id`: the bot cannot fill its smallest trade now. */
   | { do: 'unlist'; id: number; left: bigint; why: string }
   /** A take waits on offer `id`: decided at the next sync. */
@@ -820,6 +822,8 @@ export function planSizes(x: SizeInput): SizePlan {
 
   const steps: SizeStep[] = [];
   let complete = true;
+  /** The entries held at their own total while their balance had more. */
+  const capped = new Set<number>();
   x.offers.forEach((w, i) => {
     const t = tokenOf(w.symbol)!;
     const raw = (v: string) => tokenToRaw(w.symbol, v);
@@ -859,15 +863,15 @@ export function planSizes(x: SizeInput): SizePlan {
         : `this bot's Base address holds ${amountText(pool.have, decimals)} ${what}${part}, less than the smallest trade needs (${amountText(takes(min), decimals)} ${what})`;
     };
     const sized = want > 0n ? sizedOffer(w, want) : null;
-    // The entry's own total is what holds it under what the bot could list: said, so that a total written for an
-    // earlier balance does not look like a sizing that does nothing.
-    const more = most === cap && roundedDown(room, t.decimals) >= cap + min ? { more: roundedDown(room, t.decimals) } : {};
+    // The entry's own total is what holds it under what the bot could list (what that leaves unlisted is worked out
+    // below, once every entry of the balance is sized).
+    if (most === cap) capped.add(i);
     // The kit's own checks of a listing, before anything is cancelled for it (a following offer's largest trade has a
     // cap of its own, which an offer passes while it is small and can fail once it is larger).
     const refused = sized ? listingProblem(x.network, sized) : null;
     if (!listing) {
       if (sized && !refused) {
-        steps.push({ do: 'list', offer: sized, ...more });
+        steps.push({ do: 'list', offer: sized });
         use(takes(want));
       } else {
         steps.push({ do: 'none', why: refused ? `the kit would refuse it at ${sized!.total} ${t.symbol} (${refused})` : short() });
@@ -900,7 +904,7 @@ export function planSizes(x: SizeInput): SizePlan {
       return;
     }
     if (!spent && !over && !apart) {
-      steps.push({ do: 'keep', ...more });
+      steps.push({ do: 'keep' });
       use(takes(left));
       return;
     }
@@ -913,11 +917,27 @@ export function planSizes(x: SizeInput): SizePlan {
       steps.push({ do: 'keep', why: `listed again at ${sized!.total} ${t.symbol} the kit would refuse it (${refused})` });
       use(takes(left));
     } else if (sized) {
-      steps.push({ do: 'relist', id: listing.id, left, offer: sized, ...more });
+      steps.push({ do: 'relist', id: listing.id, left, offer: sized });
       use(takes(want));
     } else {
       steps.push({ do: 'unlist', id: listing.id, left, why: short() });
     }
+  });
+  // What no entry lists though the bot could: said on the first entry of the balance that is at its total, so that a
+  // total written for an earlier balance does not look like a sizing that does nothing. Where that total is the most
+  // one offer holds, only another entry can list it.
+  const told = new Set<string>();
+  steps.forEach((step, i) => {
+    const w = x.offers[i]!;
+    const pool = pools.get(drawsOn(w));
+    if (!capped.has(i) || !pool || told.has(drawsOn(w)) || !(step.do === 'keep' || step.do === 'list' || step.do === 'relist')) return;
+    const t = tokenOf(w.symbol)!;
+    const price = priceOf(w);
+    const spare = roundedDown(price === null ? pool.soft : (pool.soft * 10n ** BigInt(t.decimals)) / price, t.decimals);
+    if (spare < tokenToRaw(w.symbol, w.min)) return;
+    told.add(drawsOn(w));
+    step.more = spare;
+    if (tokenToRaw(w.symbol, w.total) === t.offerMax) step.atMost = true;
   });
   return { steps, complete };
 }
@@ -1492,7 +1512,11 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
     const did = { listed: 0, again: 0, cancelled: 0, same: 0, failed: 0 };
     const atTotal: string[] = [];
     const atItsTotal = (w: OfferInput, step: SizeStep): void => {
-      if ('more' in step && step.more !== undefined) atTotal.push(`${w.side} ${w.symbol} (its total is ${w.total} ${w.symbol}; ${w.side === 'sell' ? 'the bot could list' : `its ${usdc} covers`} ${units(step.more, tokenOf(w.symbol)!.decimals)} ${w.symbol})`);
+      if (!('more' in step) || step.more === undefined) return;
+      const amount = `${units(step.more, tokenOf(w.symbol)!.decimals)} ${w.symbol}`;
+      atTotal.push(step.atMost
+        ? `${w.side} ${w.symbol} (one offer holds at most ${w.total} ${w.symbol}: another ${w.side === 'sell' ? 'offer' : 'bid'} entry for ${w.symbol} would list ${amount} more)`
+        : `${w.side} ${w.symbol} (its total is ${w.total} ${w.symbol}, and the bot could list ${amount} more: raise its total and max)`);
     };
     for (const [i, step] of plan.steps.entries()) {
       const w = cfg.offers[i]!;
@@ -1605,7 +1629,7 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
         did.same ? `${did.same} left as listed` : '', waits.size ? `${waits.size} waiting for a take's answer` : '',
         did.failed ? `${did.failed} not listed (the listing failed; the bot tries again at its next syncs)` : ''
       ].filter(Boolean);
-      const limited = atTotal.length ? ` The config's total is the limit for: ${atTotal.join('; ')}. Raise total and max there to list more.` : '';
+      const limited = atTotal.length ? ` Not listed because of the config: ${atTotal.join('; ')}.` : '';
       const line = `Sized the offers from the balances: ${parts.join(', ') || 'nothing to list now'}.${limited} The next look is in ${(open ? sizeAgainMs : sizeEveryMs) / 1000} s${open ? ' (not every offer could be decided now)' : ''}.`;
       await session?.sized?.save(sizedAt, line);
       say(line);
