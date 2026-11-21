@@ -7,6 +7,50 @@ addresses it refuses, the contracts it checks against) is a patch release;
 one that changes what the kit does, its checks or its configuration is a
 minor release. To upgrade, follow `examples/README.md`, "Upgrading the kit".
 
+## 0.3.1 (21 November 2026)
+
+C's per-lock maximum and mainnet's USDC bound in the pins, raised by the
+owner's decision of 20 November 2026, and one more price basis read from
+the public feed. No trade, check or setting changes.
+
+- C, one lock: 1 to 100,000 C (raw 1,000,000 to 100,000,000,000; it was 1
+  to 10,000 C). One offer still holds at most 100,000 C (raw
+  100,000,000,000), so one lock may now take a whole offer.
+- Mainnet, one trade of any token: 1 to 100,000 USDC (raw 1,000,000 to
+  100,000,000,000; it was 1 to 10,000), as on devnet.
+- The public feed's price basis `unit` (C, which Saturn counts as exactly
+  1 USD, as its unit of account) is read as given in the prices the feed
+  saves with a trade (`ref.basis`), where 0.3.0 as published in the kit's
+  repository read it as null. The site's download has carried this since
+  14 November 2026.
+- The kit locks C only while the escrow's bounds for C equal its table, so
+  0.3.1 trades C only once the escrow's admin has set them to 1 to 100,000
+  C, and 0.3.0 can no longer lock C from then on. While they differ, a C
+  lock is refused, and `preflight()` fails its `escrow C` item ("The
+  escrow's bounds are not the ones this kit checks for.") for every bot,
+  whatever it trades. The example bots and the sample in "Write your own
+  bot" (`README.md`) read the preflight at their start only, so a running
+  bot trades every other token as before with either version. At a start,
+  the example bots skip a failed escrow item of a token their config does
+  not trade, so they stop only when their config trades C; a bot that
+  stops on any failed item, as that sample does, does not start, whatever
+  it trades.
+
+Upgrading a bot whose config trades C: stop it on 0.3.0 before the escrow's
+admin sets C's new bounds (Saturn announces when; one Ctrl-C cancels its
+offers and finishes its running trades, `examples/README.md`, "Stopping,
+restarting"), and start it on 0.3.1 right after, once the board lists C
+ready with the new bounds (`/v1/p2p/config?network=mainnet`: C's `max`
+`100000000000` and `ready` true). Do not leave such a bot running on 0.3.0
+past that moment: it checks C's bounds only when it locks, so it still
+accepts a C take (or takes a C buy offer as the seller), then refuses to
+lock it, and the trade counts as its no-show; three no-shows within 24
+hours pause its identity for 24 hours, for every token. Every other bot
+needs no stop: move it to 0.3.1 before its next start after that moment.
+Before that moment, a bot of your own on 0.3.1 that stops on any failed
+item, as the sample in "Write your own bot" does, stops at its start on
+`escrow C`.
+
 ## 0.3.0 (13 November 2026)
 
 Token C (Credits) joins the token table; Base log searches follow Base's

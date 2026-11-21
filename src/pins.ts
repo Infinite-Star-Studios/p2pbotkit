@@ -53,7 +53,7 @@ export interface P2PToken {
  * symbol up only through tokenOf.
  */
 export const P2P_TOKENS: readonly Readonly<P2PToken>[] = Object.freeze([
-  Object.freeze({ symbol: 'C', decimals: 6, min: 1_000_000n, max: 10_000_000_000n, offerMax: 100_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true }),
+  Object.freeze({ symbol: 'C', decimals: 6, min: 1_000_000n, max: 100_000_000_000n, offerMax: 100_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true }),
   Object.freeze({ symbol: 'RA', decimals: 9, min: 1_000_000_000n, max: 5_000_000_000_000n, offerMax: 10_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true }),
   Object.freeze({ symbol: 'TAZ', decimals: 9, min: 1_000_000_000n, max: 100_000_000_000_000n, offerMax: 10_000_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true }),
   Object.freeze({ symbol: 'SOUL', decimals: 8, min: 100_000_000n, max: 100_000_000_000_000n, offerMax: 10_000_000_000_000_000n, priceMax: 1_000_000_000_000n, gas: false, stake: true, enabled: true }),
@@ -290,7 +290,7 @@ export const P2P_CONFIG: Readonly<Record<Network, Readonly<P2PNetConfig>>> = Obj
       confirmSafe: true,
       usdcHasBlacklist: true,
       usdcMin: 1_000_000n,
-      usdcMax: 10_000_000_000n,
+      usdcMax: 100_000_000_000n,
       permit: Object.freeze({ name: 'USD Coin', version: '2' }),
       feeCaps: FEE_CAPS,
       faucetMax: 0n,
