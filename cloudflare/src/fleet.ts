@@ -694,7 +694,15 @@ export class Fleet {
       // anyway. Only then its note: an alarm that cannot be set starts no session, so none is cut off, and the note
       // stays as it was found for the next try.
       await this.#host.setAlarm(startedAt + work.deadmanMs);
-      this.#host.kv.put(WORK, { cuts } satisfies Work);
+      try {
+        this.#host.kv.put(WORK, { cuts } satisfies Work);
+      } catch (e) {
+        // No session has started, so nothing needs a long watchdog: the next try comes within the short one.
+        if (work.deadmanMs > this.#t.deadmanMs) {
+          try { await this.#host.setAlarm(startedAt + this.#t.deadmanMs); } catch { /* the alarm stays where it is */ }
+        }
+        throw e;
+      }
       let watchedAt = startedAt;
       // Whether this alarm still counts as one of the cuts in a row, should it be cut off: until it has run for provenMs.
       let counted = cuts > 0;

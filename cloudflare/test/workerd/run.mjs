@@ -69,7 +69,8 @@ try {
   await until('the offer listed', async () => (await count(/Listed offer #1/)) === 1);
   assert.equal((await bot()).mode, 'running');
   // The store says a take was sent a moment ago and not answered: the order waits, and the object still answers.
-  await until('the order held back', async () => (await count(/The order to sell 1 TAZ waits: a take this bot sent a moment ago/)) === 1);
+  // (Each session says it once while the take is held, so a second session may have said it too by now.)
+  await until('the order held back', async () => (await count(/The order to sell 1 TAZ waits: a take this bot sent a moment ago/)) >= 1);
   assert.equal(await count(/fake order #/), 0, 'no order goes out while that take may exist');
   step('1. started; the first session listed the offer and runs it, and holds its order back');
 

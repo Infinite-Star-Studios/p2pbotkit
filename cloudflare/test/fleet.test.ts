@@ -1084,6 +1084,24 @@ describe('the watchdog: an alarm at work keeps the alarm ahead of itself, so a s
     assert.match(cutLines(w)[0]!, /cut off in the middle of a session 2 times in a row/);
   });
 
+  test('an alarm that cannot write its note starts no session either, and the next try comes within DEADMAN_MS, however long its watchdog would have been', async () => {
+    const bots = { market: devnetBot() };
+    for (const [found, aheadMs] of [[undefined, DEADMAN_MS], [{ cuts: 2 }, DEADMAN_MS], [{ cuts: 6 }, DEADMAN_MS]] as Array<[unknown, number]>) {
+      const w = world(bots);
+      await w.fleet.start('market');
+      if (found !== undefined) w.kvMap.set('work', found);
+      w.host.failPuts = { key: 'work', times: 1 };
+      await assert.rejects(w.fleet.alarm(), /the storage did not take the write/);
+      assert.equal(ahead(w), aheadMs, `a note of ${JSON.stringify(found)}: the next try`);
+      assert.deepEqual(w.kvMap.get('work'), found, 'the note is as it was found');
+      assert.equal(w.opts.length, 1, 'no kit was built: no session started');
+      // The object is not left at work: the next alarm starts a session as ever.
+      void w.fleet.alarm();
+      await w.vt.advance(1_000);
+      assert.equal(w.kits.get('market')!.count('run'), 1);
+    }
+  });
+
   test('whatever the note holds, it is a note: the alarm starts, and only a whole number in it counts', async () => {
     const bots = { market: devnetBot() };
     for (const [held, cuts] of [[null, 1], ['x', 1], [5, 1], [[], 1], [{}, 1], [{ cuts: 'a' }, 1], [{ cuts: -1 }, 1], [{ cuts: 1.5 }, 1], [{ cuts: 1e300 }, 1], [{ cuts: 2 }, 3], [{ cuts: 31 }, 30], [{ cuts: 0 }, 1]] as Array<[unknown, number]>) {
