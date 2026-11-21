@@ -25,6 +25,29 @@ refusal are the same.
   which is never committed. A running bot whose entry leaves `bots.json`
   (or whose config there breaks) stops with the config it last ran with,
   and needs a new start to run again.
+- `cloudflare/`: a session cut off in the middle (a deploy, Cloudflare
+  restarting the object) is followed by the next within 30 s, while its
+  offers are still listed, where it took 7.5 to 15.5 minutes: an alarm at
+  work keeps the object's alarm 30 s ahead of itself. Sessions cut off one
+  after another, each within its first minute, come further apart, up to
+  15.5 minutes. The deploy that brings this in still waits as before: the
+  session it cuts off ran the version before it.
+- `KitInternals.signGuards` (`newSignGuards()`): the marks of the signing
+  flows under way (one per trade, check 27; one USDC claim per hash,
+  check 61) can be a host's own instead of the process's. A Durable Object
+  that is reset in place keeps its modules' memory, so a signing flow cut
+  off with it never removed its mark, and that trade's next step was
+  refused (`LOCK_BUSY`, `CLAIM_IN_FLIGHT`) for as long as the Worker's
+  process lived. `cloudflare/` gives its kits marks of its own, new with
+  each instance of the object. On a machine nothing changes: the process's
+  marks end with the process.
+- The runner: while the store still holds a listing or a take as sent and
+  unanswered (the session that sent it was cut off before the board's
+  answer came, or the answer was lost), no new listing, or no new order,
+  goes out until `run()` has settled it, two minutes after it was sent at
+  the latest. A start right after such a cut listed that offer a second
+  time for about a minute, and an order could go out before the take
+  before it was counted.
 - The store keeps its rules in `KitStore` and its records behind a
   `StoreBackend`: `FileBackend` is the data folder of every earlier
   release, unchanged; `SqlBackend` (`src/store-sql.ts`) keeps the same

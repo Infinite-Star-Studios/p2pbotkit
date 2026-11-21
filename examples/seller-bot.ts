@@ -462,7 +462,7 @@ export function readOnlyTransports(network: Network, given: KitInternals | undef
 /** What the runner uses of a Kit (createKit's Kit has all of it; tests pass a fake). */
 export type BotKit = Pick<Kit, 'network' | 'address' | 'preflight' | 'postOffer' | 'cancelOffer' | 'buyUpTo' | 'sellDownTo' | 'run' | 'close'> & {
   readonly board: Pick<Kit['board'], 'offers' | 'recent' | 'reference' | 'heartbeat'>;
-  readonly store: Pick<Kit['store'], 'listOffers' | 'listTrades'>;
+  readonly store: Pick<Kit['store'], 'listOffers' | 'listTrades' | 'listPending'>;
   readonly pha: Pick<Kit['pha'], 'balances'>;
   readonly base: Pick<Kit['base'], 'readFunds'>;
 };
@@ -495,14 +495,25 @@ export interface RunBotOptions {
 
 /** The runner's own loop wakes this often at most. */
 const TICK_MS = 5_000;
+/**
+ * And never waits less than this. A wait of 0 ends at once: a loop that asks for one on every turn lets nothing else
+ * run meanwhile, neither run() nor, where a host runs several bots in one place, anything of the others.
+ */
+const NAP_MIN_MS = 50;
 /** The offers are checked against the config this often. */
 const SYNC_EVERY_MS = 60_000;
 /** While stopping, the running trades are named this often. */
 const NOTE_EVERY_MS = 60_000;
 /** With sizeFromBalances: an offer the bot holds too little for, and a look that could not finish, are taken up again this often, not at every sync (each look reads the chains). */
 const SHORT_AGAIN_MS = 300_000;
-/** A listing whose answer from the board was lost is not sent again for this long: run() first settles whether it was made. */
+/**
+ * A listing whose answer from the board was lost is not sent again for this long: run() first settles whether it was
+ * made. The same for a listing or a take the store still holds as sent and unanswered (the session that sent it was
+ * cut off before the answer came): nothing new of its kind goes out until run() has settled it, or this long has passed.
+ */
 const SETTLE_MS = 120_000;
+/** What the bot says while it holds a listing back for one that is not settled yet. */
+const UNSETTLED = 'a listing this bot sent a moment ago got no answer here (its session was cut off, or the answer was lost) and may exist on the board; the bot lists nothing new until that is settled, within two minutes';
 /** A take that waits on an offer holds that offer's sizing back for this many looks in a row at most; then the offer is cancelled with the take, which the bot had not answered in all that time. */
 const MAX_WAITS = 3;
 /** One Ctrl-C that a wrapper delivers twice within this long counts once. */
@@ -1330,7 +1341,26 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
   if (session?.until.aborted) onUntil();
   else session?.until.addEventListener('abort', onUntil, { once: true });
 
+  /**
+   * Until when nothing new of this kind goes out: the store holds a create (a listing, or a take) that was sent a
+   * moment ago and whose answer never came, because the session that sent it was cut off or the answer was lost.
+   * It may exist on the board, and the bot's records do not show it yet. run() asks the board about it once it is
+   * a minute old, keeps what was made (an offer nobody saw listed is then cancelled) and clears it. 0: there is
+   * none. One older than SETTLE_MS holds nothing back: an entry the board never answers about, or one kept for the
+   * operator, must not stop the bot's listings for good.
+   */
+  const unsettledUntil = async (kind: 'offer' | 'take'): Promise<number> => {
+    let until = 0;
+    for (const p of await kit.store.listPending()) {
+      if (p.kind === kind && p.sentAt != null && Math.abs(now() - p.sentAt) < SETTLE_MS) until = Math.max(until, p.sentAt + SETTLE_MS);
+    }
+    return until;
+  };
+
   const syncOffers = async (): Promise<void> => {
+    // Read before the kept offers: run() keeps the offer a create made before it clears the create's entry, so what
+    // was made is never missing from both.
+    const held = await unsettledUntil('offer');
     const kept = (await kit.store.listOffers()).filter((k) => k.closedAt == null);
     const used = new Set<number>();
     for (const w of cfg.offers) {
@@ -1339,6 +1369,11 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
       const same = kept.find((k) => !used.has(k.id) && sameOffer(k, w, cfg.acceptOnTheirOwn));
       if (same) {
         used.add(same.id);
+        continue;
+      }
+      if (now() < held) {
+        // Listed now, it could stand on the board twice: the next sync lists it, once run() has settled the other.
+        note(key, `Not listing ${describeOffer(w, usdc)} yet: ${UNSETTLED}.`);
         continue;
       }
       const short = await fundsShort(kit, w, usdc);
@@ -1401,6 +1436,10 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
    */
   const syncSized = async (): Promise<void> => {
     const halted = (): boolean => stopping || runCtl.signal.aborted;
+    // Read before the kept offers, as in syncOffers: an entry without a listing is held while a listing sent a moment
+    // ago may still exist on the board.
+    const held = await unsettledUntil('offer');
+    const heldUntil = (i: number): number => Math.max(settling.get(i) ?? 0, held);
     const all = await kit.store.listOffers();
     const { mine, others } = sizedMatch(all.filter((k) => k.closedAt == null), cfg);
     // An offer no entry lists goes first: what it promised is then free for the entries.
@@ -1414,6 +1453,8 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
       }
     }
     if (cfg.offers.length === 0) return;
+    if (now() < held && mine.some((k) => !k)) note('unsettled', `Not listing what has no listing yet: ${UNSETTLED}.`);
+    else notes.delete('unsettled');
     // The trades first, then the balances: a lock that lands in between is counted twice (still owed, and gone from
     // the balance), never not at all.
     const trades = await kit.store.listTrades();
@@ -1431,7 +1472,7 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
       if (full || again.has(i)) return true;
       return w.follow?.dailyMax === undefined && BigInt(k.tazTotal) - taken[i]! < tokenToRaw(w.symbol, w.min) && usedUp.get(k.id) !== taken[i];
     });
-    const unlisted = cfg.offers.map((_, i) => !mine[i] && now() >= (settling.get(i) ?? 0));
+    const unlisted = cfg.offers.map((_, i) => !mine[i] && now() >= heldUntil(i));
     const missing = unlisted.map((u, i) => (u ? String(i) : '')).join(',');
     if (!look.some(Boolean) && (!unlisted.some(Boolean) || (missing === shortOf && now() < shortUntil))) return;
     if (halted()) return;
@@ -1582,8 +1623,9 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
         }
         // The bot stops, or its session ended, between the two: the next sync or session lists it.
         if (halted()) return;
-      } else if (now() < (settling.get(i) ?? 0)) {
-        // Its last listing got no clear answer from the board and may exist: not sent again until run() has settled it.
+      } else if (now() < heldUntil(i)) {
+        // Its last listing got no clear answer from the board and may exist, or one the bot sent before this session
+        // did: not sent again until run() has settled it.
         onlyShort = false;
         continue;
       }
@@ -1734,6 +1776,8 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
     const keptDue = session?.takeDue ? await session.takeDue.load() : [];
     const due = cfg.take.map((_, i) => (Number.isFinite(keptDue[i]) ? keptDue[i]! : now()));
     while (!runCtl.signal.aborted) {
+      /** The orders that are due and held back in this pass: they stay due, and the loop looks at them again a tick later. */
+      const heldBack = new Set<number>();
       if (stopping) {
         if (!cancelled) cancelled = await cancelAll();
         const open = (await kit.store.listTrades()).filter((t) => !t.endedAt);
@@ -1755,6 +1799,14 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
         }
         for (let i = 0; i < cfg.take.length && !stopping && !runCtl.signal.aborted; i++) {
           if (now() < due[i]!) continue;
+          // A take of this bot that was sent a moment ago and got no answer here may exist, and the bot's records do
+          // not count it yet: an order sent now could promise the same funds twice. It goes out once run() has
+          // settled that take.
+          if (now() < await unsettledUntil('take')) {
+            heldBack.add(i);
+            note(`take:${i}`, `The order to ${cfg.take[i]!.side} ${cfg.take[i]!.amount} ${cfg.take[i]!.symbol} waits: a take this bot sent a moment ago got no answer here and may exist on the board; the order goes out once that is settled, within two minutes.`);
+            continue;
+          }
           // A host's session can be cut at any moment (a deploy, an eviction): the order's next time is kept before
           // the order goes out, so that a cut never sends one order twice.
           if (session?.takeDue) {
@@ -1767,8 +1819,11 @@ export async function trade(kit: BotKit, cfg: HostedBotConfig, x: TradeOptions):
         }
       }
       if (runCtl.signal.aborted) break;
-      const soonest = stopping ? TICK_MS : Math.min(nextSync, ...due) - now();
-      await nap(Math.max(0, Math.min(TICK_MS, soonest)));
+      // An order held back is still due, so its time is in the past: it must not make this a wait of 0 on every turn.
+      // run() settles the take it waits for, and has to be let run.
+      const next = Math.min(nextSync, ...due.filter((_, i) => !heldBack.has(i)));
+      const soonest = stopping ? TICK_MS : next - now();
+      await nap(Math.max(NAP_MIN_MS, Math.min(TICK_MS, soonest)));
     }
   } catch (e) {
     // A failure of the loop itself (the store lost its lock, for one): reported like run()'s, once run() has ended.

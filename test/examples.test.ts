@@ -51,7 +51,7 @@ import { SATURN_SWAP_ABI, USDC_ABI, pinnedDomainSeparator, type BaseClient, type
 import type { PhaRpc, PhaCall, PhaBalance, PhaTxState, PhaBalances } from '../src/pha.js';
 import { loadKeys } from '../src/keys.js';
 import { openStore } from '../src/store.js';
-import type { Offer, Trade } from '../src/types.js';
+import type { Offer, Trade, PendingCreate } from '../src/types.js';
 import { runBot, parseBotConfig, parseHostedConfig, trade, SESSION_PAUSED, kitOptions, botPolicy, networkGate, readOnlyTransports, defaultConfigPath, referenceLines, sameOffer, describeOffer, guardProcess, MARKET_CONFIG, planSizes, sizedOffer, sizedSame, plainAmount, dryRunRest, SIZE_EVERY_S, type BotKit, type Role, type SizedListing, type HostedBotConfig } from '../examples/seller-bot.js';
 import { main as newKeysMain, makeKeyPairs } from '../examples/new-keys.js';
 import { main as faucetMain } from '../examples/faucet.js';
@@ -143,10 +143,10 @@ class VTime {
   jump = async (ms: number, _signal?: AbortSignal): Promise<void> => {
     if (ms > 0) this.ms += ms;
   };
-  /** A wait that lasts until advance() reaches it, or its signal aborts (run() tests). */
+  /** A wait that lasts until advance() reaches it, or its signal aborts (run() tests). A wait of 0 ends at once, as the kit's own does (src/board.ts sleep). */
   sleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promise<void>((resolve) => {
     if (signal?.aborted) { resolve(); return; }
-    if (!(ms > 0)) { setImmediate(resolve); return; }
+    if (!(ms > 0)) { resolve(); return; }
     const t = {
       at: this.ms + ms,
       done: () => {
@@ -1053,6 +1053,8 @@ class FakeKit {
   failing = new Set<string>();
   /** How often the balances and the board's word on an offer were read. */
   reads = { balances: 0, readFunds: 0, heartbeat: 0 };
+  /** How often the creates still unanswered were read. A loop that reads them without ever waiting is stopped here, not left to hang. */
+  pendingReads = 0;
   #next = 1;
 
   constructor(readonly clock: () => number) {}
@@ -1082,9 +1084,16 @@ class FakeKit {
     }
   };
 
+  /** The creates the store still holds as sent and unanswered (pending/): what a session cut off before the board's answer leaves. */
+  pending: Array<{ kind: 'offer' | 'take'; sentAt: number | null }> = [];
+
   readonly store = {
     listOffers: async () => this.offers.map((o) => ({ ...o })),
-    listTrades: async () => this.trades.map((t) => ({ ...t }))
+    listTrades: async () => this.trades.map((t) => ({ ...t })),
+    listPending: async () => {
+      if (++this.pendingReads > 20_000) throw new Error('the unanswered creates were read 20000 times: a loop spins without waiting');
+      return this.pending.map((p) => ({ ...p })) as unknown as PendingCreate[];
+    }
   };
 
   readonly pha = {
@@ -1724,6 +1733,197 @@ describe('the runner in sessions (a host such as a Cloudflare Durable Object: cl
     assert.equal(await drive(vt, trade(kit as unknown as BotKit, cfg, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: done.signal, takeDue } })), SESSION_PAUSED);
   });
 
+  test('a listing or a take the store still holds as sent and unanswered (the session before was cut off before the answer came): nothing new of its kind goes out until run() has settled it, or two minutes after it was sent', async () => {
+    const cfg = parseHostedConfig(await hostedSeller(), { apiKey: false });
+    const start = (kit: FakeKit, vt: VTime) => {
+      const out = sink();
+      const end = new AbortController();
+      const p = trade(kit as unknown as BotKit, cfg, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: end.signal } });
+      return { out, end, p };
+    };
+    const held = (lines: string[]) => lines.filter((l) => /^Not listing .* yet: a listing this bot sent a moment ago got no answer here \(its session was cut off, or the answer was lost\) and may exist on the board; the bot lists nothing new until that is settled, within two minutes\.$/.test(l));
+    const waits = (lines: string[]) => lines.filter((l) => /^The order to sell 2 TAZ waits: a take this bot sent a moment ago got no answer here and may exist on the board; the order goes out once that is settled, within two minutes\.$/.test(l));
+    const firstAt = (kit: FakeKit, fn: string) => kit.calls.find((c) => c.fn === fn)!.at;
+
+    // A listing sent 25 s before this session. run() settles it 40 s into the session (its entry is cleared).
+    {
+      const vt = new VTime();
+      const kit = new FakeKit(vt.now);
+      const t0 = vt.now();
+      kit.pending = [{ kind: 'offer', sentAt: t0 - 25_000 }];
+      const s1 = start(kit, vt);
+      await until(vt, () => kit.count('sellDownTo') >= 1, 'the order', { stepMs: 1_000 });
+      assert.ok(firstAt(kit, 'sellDownTo') <= t0 + 1_000, 'an order is another kind: it goes out as ever');
+      assert.equal(kit.count('run'), 1);
+      assert.equal(kit.count('postOffer'), 0, 'nothing is listed while that listing may exist on the board');
+      assert.equal(held(s1.out.lines).length, 2, 'said for each of the two offers');
+      await vt.advance(40_000);
+      kit.pending = [];
+      await vt.advance(10_000);
+      assert.equal(kit.count('postOffer'), 0, 'the next sync lists them, not before');
+      await until(vt, () => kit.count('postOffer') >= 2, 'the offers', { stepMs: 1_000 });
+      assert.ok(firstAt(kit, 'postOffer') >= t0 + 59_000 && firstAt(kit, 'postOffer') <= t0 + 62_000, 'at the sync a minute after the start');
+      assert.equal(held(s1.out.lines).length, 2, 'said once each');
+      assert.equal(waits(s1.out.lines).length, 0);
+      s1.end.abort();
+      assert.equal(await drive(vt, s1.p), SESSION_PAUSED);
+    }
+
+    // The same, but its entry is never cleared (the board does not answer about it): two minutes after it was sent
+    // the bot lists all the same.
+    {
+      const vt = new VTime();
+      const kit = new FakeKit(vt.now);
+      const t0 = vt.now();
+      kit.pending = [{ kind: 'offer', sentAt: t0 - 25_000 }];
+      const s2 = start(kit, vt);
+      await until(vt, () => kit.count('run') >= 1, 'run()', { stepMs: 1_000 });
+      await vt.advance(90_000);
+      assert.equal(kit.count('postOffer'), 0, 'still held 115 s after it was sent (the sync at 60 s found it 85 s old)');
+      await until(vt, () => kit.count('postOffer') >= 2, 'the offers', { stepMs: 1_000 });
+      assert.ok(firstAt(kit, 'postOffer') >= t0 + 119_000 && firstAt(kit, 'postOffer') <= t0 + 122_000, 'at the sync two minutes after the start: the entry is 145 s old');
+      assert.equal(kit.pending.length, 1);
+      s2.end.abort();
+      assert.equal(await drive(vt, s2.p), SESSION_PAUSED);
+    }
+
+    // What holds nothing back: an entry never sent, one sent two minutes ago, one whose send time is far ahead of the
+    // clock (a record that cannot be right must not stop the listings for good), and one of the other kind. And a
+    // take sent 5 s before the session holds the order, until its entry is cleared.
+    {
+      const vt = new VTime();
+      const kit = new FakeKit(vt.now);
+      const t0 = vt.now();
+      kit.pending = [{ kind: 'offer', sentAt: null }, { kind: 'offer', sentAt: t0 - 120_000 }, { kind: 'offer', sentAt: t0 + 10 * 60_000 }, { kind: 'take', sentAt: t0 - 5_000 }];
+      const s3 = start(kit, vt);
+      await until(vt, () => kit.count('run') >= 1, 'run()', { stepMs: 1_000 });
+      assert.equal(kit.count('postOffer'), 2, 'the offers are listed at the start');
+      assert.equal(held(s3.out.lines).length, 0);
+      await vt.advance(30_000);
+      assert.equal(kit.count('sellDownTo'), 0, 'the order waits for the take that may exist');
+      assert.equal(waits(s3.out.lines).length, 1, 'and says so, once');
+      // Held, the order stays due; the loop still waits a tick between two looks at it, so that run() can settle the
+      // take (a loop that asked for a wait of 0 here would let nothing else run).
+      assert.ok(kit.pendingReads >= 6 && kit.pendingReads <= 10, `${kit.pendingReads} reads of the unanswered creates in 30 s: one per tick of the loop, and the sync's`);
+      kit.pending = kit.pending.filter((x) => x.kind !== 'take');
+      await until(vt, () => kit.count('sellDownTo') >= 1, 'the order', { stepMs: 1_000 });
+      assert.ok(firstAt(kit, 'sellDownTo') <= vt.now() && firstAt(kit, 'sellDownTo') >= t0 + 30_000 && firstAt(kit, 'sellDownTo') <= t0 + 37_000, 'within one turn of the loop after the take was settled');
+      s3.end.abort();
+      assert.equal(await drive(vt, s3.p), SESSION_PAUSED);
+    }
+
+    // An offer the bot keeps is left alone meanwhile: neither listed again nor cancelled.
+    {
+      const vt = new VTime();
+      const kit = new FakeKit(vt.now);
+      const s5 = start(kit, vt);
+      await until(vt, () => kit.count('run') >= 1, 'run()', { stepMs: 1_000 });
+      assert.equal(kit.count('postOffer'), 2);
+      s5.end.abort();
+      assert.equal(await drive(vt, s5.p), SESSION_PAUSED);
+      // The second offer is gone, and a listing sent 10 s ago may be the one that replaces it.
+      kit.offers[1]!.closedAt = vt.now();
+      kit.pending = [{ kind: 'offer', sentAt: vt.now() - 10_000 }];
+      const s6 = start(kit, vt);
+      await until(vt, () => kit.count('run') >= 2, 'run() again', { stepMs: 1_000 });
+      await vt.advance(70_000);
+      assert.equal(kit.count('postOffer'), 2, 'nothing listed while held: two syncs');
+      assert.equal(kit.count('cancelOffer'), 0, 'and the offer the bot keeps is not cancelled');
+      assert.equal(held(s6.out.lines).length, 1, 'said for the one offer that has no listing');
+      kit.pending = [];
+      await until(vt, () => kit.count('postOffer') >= 3, 'the second offer', { stepMs: 1_000 });
+      assert.equal(kit.count('cancelOffer'), 0);
+      s6.end.abort();
+      assert.equal(await drive(vt, s6.p), SESSION_PAUSED);
+    }
+
+    // Two orders, and a take of the first that loses its answer in this very session: the second order waits for it,
+    // the loop keeps its pace, and the host's kept times are left as they are while it waits.
+    {
+      const vt = new VTime();
+      const kit = new FakeKit(vt.now);
+      const two = parseHostedConfig({ ...(await hostedSeller()), take: [{ symbol: 'TAZ', minPrice: '1.05', amount: '2', everyS: 300 }, { symbol: 'RA', minPrice: '1.70', amount: '1', everyS: 300 }] }, { apiKey: false });
+      const t0 = vt.now();
+      const sell = kit.sellDownTo.bind(kit);
+      kit.sellDownTo = async (o: unknown) => {
+        // The first order's take goes out and its answer is lost: the store keeps it as sent.
+        if (kit.count('sellDownTo') === 0) kit.pending = [{ kind: 'take', sentAt: vt.now() }];
+        return sell(o);
+      };
+      const saved: number[][] = [];
+      const takeDue = { load: () => saved.at(-1) ?? [], save: (d: readonly number[]) => { saved.push([...d]); } };
+      const out = sink();
+      const end = new AbortController();
+      const p = trade(kit as unknown as BotKit, two, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: end.signal, takeDue } });
+      await until(vt, () => kit.count('sellDownTo') >= 1, 'the first order', { stepMs: 1_000 });
+      await vt.advance(60_000);
+      assert.equal(kit.count('sellDownTo'), 1, 'the second order waits for the first one\'s take');
+      assert.equal(out.lines.filter((l) => /^The order to sell 1 RA waits: a take this bot sent a moment ago/.test(l)).length, 1);
+      assert.ok(kit.pendingReads <= 20, `${kit.pendingReads} reads in a minute: the loop keeps its pace`);
+      const kept = saved.length;
+      assert.ok(saved.at(-1)![1]! <= t0 + 1_000, 'the second order\'s kept time is still the time it was due: a session that ends now leaves it due');
+      await vt.advance(20_000);
+      assert.equal(saved.length, kept, 'nothing is kept anew while it waits');
+      // The session ends while the order waits; the next one finds the take settled and sends the order at once.
+      end.abort();
+      assert.equal(await drive(vt, p), SESSION_PAUSED);
+      kit.pending = [];
+      const end2 = new AbortController();
+      const p2 = trade(kit as unknown as BotKit, two, { say: out.out, usdc: 'mUSDC', now: vt.now, sleep: vt.sleep, signals: new EventEmitter(), session: { until: end2.signal, takeDue } });
+      const t1 = vt.now();
+      await until(vt, () => kit.count('sellDownTo') >= 2, 'the second order', { stepMs: 1_000 });
+      const second = kit.calls.filter((c) => c.fn === 'sellDownTo')[1]!;
+      assert.deepEqual((second.arg as { symbol: string }).symbol, 'RA');
+      assert.ok(second.at <= t1 + 1_000, 'at the next session\'s start, since it was still due');
+      assert.equal(kit.count('sellDownTo'), 2, 'and the first order, not due before its five minutes, is not sent again');
+      end2.abort();
+      assert.equal(await drive(vt, p2), SESSION_PAUSED);
+    }
+
+    // A take that is never settled holds the order until two minutes after it was sent.
+    {
+      const vt = new VTime();
+      const kit = new FakeKit(vt.now);
+      const t0 = vt.now();
+      kit.pending = [{ kind: 'take', sentAt: t0 - 5_000 }];
+      const s4 = start(kit, vt);
+      await until(vt, () => kit.count('run') >= 1, 'run()', { stepMs: 1_000 });
+      await vt.advance(108_000);
+      assert.equal(kit.count('sellDownTo'), 0, 'still held 114 s after it was sent');
+      await until(vt, () => kit.count('sellDownTo') >= 1, 'the order', { stepMs: 1_000 });
+      assert.ok(firstAt(kit, 'sellDownTo') >= t0 + 115_000 && firstAt(kit, 'sellDownTo') <= t0 + 121_000);
+      s4.end.abort();
+      assert.equal(await drive(vt, s4.p), SESSION_PAUSED);
+    }
+  });
+
+  test('the loop never asks for a wait of 0, which would let nothing else run: an order that fell due while another one ran is sent a moment later', async () => {
+    const vt = new VTime();
+    const kit = new FakeKit(vt.now);
+    const cfg = parseHostedConfig({ ...(await hostedSeller()), take: [{ symbol: 'TAZ', minPrice: '1.05', amount: '2', everyS: 10 }, { symbol: 'RA', minPrice: '1.70', amount: '1', everyS: 300 }] }, { apiKey: false });
+    // The second order takes 25 s (its takes are slow to come back): the first one falls due meanwhile.
+    const sell = kit.sellDownTo.bind(kit);
+    kit.sellDownTo = async (o: unknown) => {
+      if ((o as { symbol: string }).symbol === 'RA') await vt.sleep(25_000);
+      return sell(o);
+    };
+    const asked: number[] = [];
+    const out = sink();
+    const end = new AbortController();
+    const p = trade(kit as unknown as BotKit, cfg, {
+      say: out.out, usdc: 'mUSDC', now: vt.now, sleep: (ms, signal) => { asked.push(ms); return vt.sleep(ms, signal); }, signals: new EventEmitter(), session: { until: end.signal }
+    });
+    await until(vt, () => kit.count('sellDownTo') >= 3, 'the first order again', { stepMs: 1_000 });
+    const calls = kit.calls.filter((c) => c.fn === 'sellDownTo');
+    assert.deepEqual(calls.map((c) => (c.arg as { symbol: string }).symbol), ['TAZ', 'RA', 'TAZ']);
+    // The fake notes the second order when it comes back, 25 s after it went out.
+    assert.equal(calls[1]!.at - calls[0]!.at, 25_000);
+    assert.ok(calls[2]!.at - calls[1]!.at >= 50 && calls[2]!.at - calls[1]!.at <= 100, `the first order goes out again ${calls[2]!.at - calls[1]!.at} ms after the second came back: after a short wait, not after none`);
+    assert.ok(asked.length > 0 && Math.min(...asked) >= 50, `the shortest wait the loop asked for: ${Math.min(...asked)} ms`);
+    end.abort();
+    assert.equal(await drive(vt, p), SESSION_PAUSED);
+  });
+
   test('a stop asked before the session (stopping): no offer or order, the offers cancelled, the trades finished, then 0; a stop signal in a session does the same', async () => {
     const vt = new VTime();
     const kit = new FakeKit(vt.now);
@@ -2104,6 +2304,91 @@ describe('offers sized from the balances (sizeFromBalances)', () => {
     assert.deepEqual(open(kit).map((o) => o.id), [4, 5]);
     s3.end.abort();
     assert.equal(await drive(vt, s3.p), SESSION_PAUSED);
+  });
+
+  test('the runner: an entry without a listing is held while a listing sent before this session may still exist on the board; nothing is read for it meanwhile, and it is listed once that is settled', async () => {
+    const vt = new VTime();
+    const kit = new FakeKit(vt.now);
+    kit.held.set('TAZ', tok('TAZ', '12.3456789'));
+    kit.usdc = usdcToRaw('37');
+    const cfg = hosted(SIZED);
+    const saved: number[] = [];
+    const s1 = session(kit, vt, cfg, saved);
+    await started(vt, saved);
+    assert.equal(posts(kit).length, 2);
+    s1.end.abort();
+    assert.equal(await drive(vt, s1.p), SESSION_PAUSED);
+    // Ten minutes later (the timed look is due) the session after it was cut off while it listed the buy offer again:
+    // the old listing is cancelled, the new one was sent 20 s ago, and no answer was kept.
+    await vt.advance(600_000);
+    kit.offers[1]!.closedAt = vt.now();
+    kit.pending = [{ kind: 'offer', sentAt: vt.now() - 20_000 }];
+    const reads = { ...kit.reads };
+    const s2 = session(kit, vt, cfg, saved);
+    const t0 = vt.now();
+    await until(vt, () => kit.count('run') >= 2, 'run() again', { stepMs: 1_000 });
+    await vt.advance(5_000);
+    const said = () => s2.out.lines.filter((l) => l === 'Not listing what has no listing yet: a listing this bot sent a moment ago got no answer here (its session was cut off, or the answer was lost) and may exist on the board; the bot lists nothing new until that is settled, within two minutes.');
+    // The timed look of this session's start looked at the sell offer, which is listed, and left the buy offer alone.
+    assert.equal(kit.reads.balances, reads.balances + 1, 'the look was made');
+    assert.ok(s2.out.lines.some((l) => l.startsWith('Sized the offers from the balances: 1 left as listed.')), s2.out.lines.join('\n'));
+    assert.equal(posts(kit).length, 2, 'the buy offer is not listed while the one that was sent may exist');
+    assert.equal(said().length, 1);
+    assert.equal(kit.count('cancelOffer'), 0, 'the sell offer is left as it is');
+    const looked = { ...kit.reads };
+    // The sync a minute later still holds it (80 s after it was sent), and reads nothing for it. Then run() settles
+    // it: nothing was made.
+    await vt.advance(60_000);
+    assert.equal(posts(kit).length, 2);
+    assert.deepEqual(kit.reads, looked, 'nothing is read for an entry that is held');
+    kit.pending = [];
+    await until(vt, () => posts(kit).length >= 3, 'the buy offer', { stepMs: 1_000 });
+    assert.deepEqual(posts(kit)[2], { ...BID, acceptOnTheirOwn: true });
+    const at = kit.calls.filter((c) => c.fn === 'postOffer')[2]!.at;
+    assert.ok(at >= t0 + 119_000 && at <= t0 + 123_000, 'at the next sync');
+    assert.equal(said().length, 1, 'said once');
+    assert.equal(open(kit).length, 2);
+    // With every entry listed, a listing that is not settled holds nothing, and nothing is said of it.
+    kit.pending = [{ kind: 'offer', sentAt: vt.now() - 5_000 }];
+    await vt.advance(70_000);
+    assert.equal(said().length, 1);
+    assert.equal(posts(kit).length, 3);
+    kit.pending = [];
+    // Never settled, it is listed two minutes after it was sent all the same.
+    kit.offers.find((o) => o.side === 'buy' && o.closedAt == null)!.closedAt = vt.now();
+    kit.pending = [{ kind: 'offer', sentAt: vt.now() - 20_000 }];
+    const before = posts(kit).length;
+    const t1 = vt.now();
+    await vt.advance(95_000);
+    assert.equal(posts(kit).length, before, 'held for 115 s after it was sent');
+    await until(vt, () => posts(kit).length > before, 'the buy offer again', { stepMs: 1_000 });
+    assert.ok(kit.calls.filter((c) => c.fn === 'postOffer').at(-1)!.at <= t1 + 181_000);
+    assert.equal(said().length, 2, 'said again for the second hold');
+    s2.end.abort();
+    assert.equal(await drive(vt, s2.p), SESSION_PAUSED);
+  });
+
+  test('the runner: with no listing at all and a listing sent before the session unsettled, the first look waits: nothing is read, listed or kept as looked at until that is settled', async () => {
+    const vt = new VTime();
+    const kit = new FakeKit(vt.now);
+    kit.held.set('TAZ', tok('TAZ', '12.3456789'));
+    kit.usdc = usdcToRaw('37');
+    const cfg = hosted(SIZED);
+    const saved: number[] = [];
+    kit.pending = [{ kind: 'offer', sentAt: vt.now() - 30_000 }];
+    const s1 = session(kit, vt, cfg, saved);
+    await until(vt, () => kit.count('run') >= 1, 'run()', { stepMs: 1_000 });
+    await vt.advance(70_000);
+    assert.equal(posts(kit).length, 0);
+    assert.deepEqual(kit.reads, { balances: 0, readFunds: 0, heartbeat: 0 });
+    assert.equal(saved.length, 0, 'no look is kept: none was made');
+    assert.equal(s1.out.lines.filter((l) => l.startsWith('Not listing what has no listing yet: ')).length, 1);
+    // Two minutes after it was sent the bot lists all the same, and that is its first look.
+    await until(vt, () => posts(kit).length >= 2, 'the offers', { stepMs: 1_000 });
+    assert.equal(saved.length, 1);
+    assert.ok(s1.out.lines.includes('Sized the offers from the balances: 2 listed. The next look is in 600 s.'), s1.out.lines.join('\n'));
+    s1.end.abort();
+    assert.equal(await drive(vt, s1.p), SESSION_PAUSED);
   });
 
   test('the runner: offers listed before the option was on are kept and sized at the first look; an offer the config no longer lists is cancelled', async () => {

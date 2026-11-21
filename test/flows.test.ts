@@ -31,7 +31,7 @@ import { inflateSync } from 'node:zlib';
 import { PhantasmaKeys, Transaction } from 'phantasma-sdk-ts';
 import { generatePrivateKey } from 'viem/accounts';
 import { decodeFunctionData, keccak256, parseTransaction, recoverTransactionAddress, type AbiEvent } from 'viem';
-import { createKit, createHostedKit, SqlBackend, FLOW_CODES, SafetyError, type Kit, type KitOptions, type HostedKitOptions, type SqlDatabase, type StepResult, type Policy } from '../src/index.js';
+import { createKit, createHostedKit, newSignGuards, SqlBackend, FLOW_CODES, SafetyError, type Kit, type KitOptions, type HostedKitOptions, type SqlDatabase, type StepResult, type Policy } from '../src/index.js';
 import { BoardError } from '../src/errors.js';
 import { hexToDecimal, decimalToHex, sha256Hex, hashOfSecret } from '../src/codec.js';
 import { P2P_CONFIG, P2P_TOKENS, BOARD, phaPinned, baseDeployed } from '../src/pins.js';
@@ -2476,6 +2476,50 @@ async function hostedFor(w: World, bot: Bot, db: SqliteDb, o: Partial<HostedKitO
 }
 
 describe('createHostedKit: the keys from a host\'s secrets, the store on SQLite (a Durable Object)', { skip: Sqlite ? false : 'node:sqlite needs Node 22.13 or later' }, () => {
+  test('a host reset in place while its seller waits for its lock\'s outcome: with marks of its own (internals.signGuards), the host\'s next life signs for that trade; with the marks of the life that was cut off it never could', async () => {
+    const w = world();
+    const db = new Sqlite!(':memory:');
+    const sBot = await newBot(w);
+    const never = new Promise<void>(() => {});
+    const life1 = newSignGuards();
+    const s = await hostedFor(w, sBot, db, { internals: { signerSleep: () => never, signGuards: life1 } });
+    const b = await kitFor(w, await newBot(w));
+    const offer = await s.kit.postOffer(SELL);
+    const id = (await b.kit.take(offer.id, '2')).id;
+    await s.kit.step(id, { acceptAfterS: 0 });
+    // The lock goes out, and the flow waits for its outcome. The host is reset here: nothing of this kit runs again,
+    // so the flow never ends and never removes its mark. The process, and with it every module's memory, lives on.
+    void s.kit.step(id).catch(() => undefined);
+    for (let i = 0; i < 200 && w.pha.count('lock') === 0; i++) await settle(5);
+    assert.equal(w.pha.count('lock'), 1, 'the lock went out before the reset');
+    assert.deepEqual([...life1.busy], [`devnet:${id}`]);
+    w.vt.ms += 25_000;
+    // The host's next life, 25 s later: a new handle on the same database, and marks of its own.
+    const s2 = await hostedFor(w, sBot, db, { internals: { signGuards: newSignGuards() } });
+    assert.ok(s2.logs.some((l) => /taking over its lock/.test(l)));
+    await stepUntil(w, s2, id, (r) => r.action === 'reportPhaLock' && r.outcome === 'done');
+    assert.equal(w.board.trades.get(id)!.t.status, 'pha_locked');
+    assert.equal(w.pha.count('lock'), 1, 'the lock is reported, never sent again');
+    // The buyer never locks. Past T1 and the keeper's grace the seller refunds its own tokens: a signing flow of that trade.
+    const rec = (await s2.kit.store.getTrade(id))!;
+    w.vt.ms = (rec.t1! + CFG.timing.phaRefundGrace + 5) * 1000;
+    await s2.kit.close();
+    // A kit with the marks of the life that was cut off is refused, however often it tries.
+    const stuck = await hostedFor(w, sBot, db, { internals: { signGuards: life1 } });
+    for (let i = 0; i < 5; i++) {
+      const r = await stuck.kit.step(id);
+      assert.equal(`${r.action} ${r.outcome} ${r.code}`, 'refundPha refused LOCK_BUSY');
+      w.vt.ms += 10_000;
+    }
+    assert.equal(w.pha.count('refund'), 0);
+    await stuck.kit.close();
+    // With marks of its own, the next life sends the refund.
+    const s3 = await hostedFor(w, sBot, db, { internals: { signGuards: newSignGuards() } });
+    await stepUntil(w, s3, id, (r) => r.action === 'refundPha' && r.outcome === 'done');
+    assert.equal(w.pha.count('refund'), 1);
+    assert.deepEqual([...life1.busy], [`devnet:${id}`], 'the mark of the flow that was cut off is still in its own life\'s marks, where it harms nothing');
+  });
+
   test('a hosted seller trades a sell offer to the end with a buyer on files, and resumes after its host dies mid-trade: one lock, one claim', async () => {
     const w = world();
     const db = new Sqlite!(':memory:');
@@ -2566,6 +2610,11 @@ describe('createHostedKit: the keys from a host\'s secrets, the store on SQLite 
     await assert.rejects(hostedFor(w, bot, db, { keys: undefined as never }), bad('BAD_INPUT', /keys/));
     await assert.rejects(hostedFor(w, bot, db, { store: {} as never }), bad('BAD_INPUT', /StoreBackend/));
     await assert.rejects(hostedFor(w, bot, db, { network: 'mainnet' }), bad('NETWORK_OFF'));
+    // Marks that are not marks: refused before the store is opened, so that a kit open on the same database keeps its lock.
+    for (const marks of [{}, null, { busy: new Set<string>() }]) {
+      await assert.rejects(hostedFor(w, bot, db, { internals: { signGuards: marks as never } }), bad('BAD_INPUT', /internals\.signGuards .* newSignGuards\(\)/));
+    }
+    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().length, 0, 'the store was never opened');
     assert.equal(w.board.calls.length, 0, 'no board read before those refusals');
     const wif = PhantasmaKeys.generate().toWIF();
     await assert.rejects(hostedFor(w, bot, db, { keys: { pha: wif, base: '{}' } }), (e: unknown) => bad('KEY_FILE', /secret PHA_KEY is not JSON/)(e) && !(e as Error).message.includes(wif));

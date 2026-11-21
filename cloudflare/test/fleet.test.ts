@@ -3,12 +3,16 @@
  * node:sqlite, its key-value storage a map, its alarm a field), a fake kit
  * and a virtual clock: the starts and their gates, the sessions an alarm
  * runs (a pause at their end, never a stop), the stop and the halt, the
- * waits after a failed session, and the dry run.
+ * waits after a failed session, the dry run, and the watchdog: what follows
+ * a session cut off in the middle (a deploy).
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { Fleet, loadBots, loadBotsConfig, SESSION_MS, DEADMAN_MS, NEXT_MS, JOIN_POLL_MS, BACKOFF_MS, type FleetHost, type FleetKit } from '../src/fleet.js';
+import {
+  Fleet, loadBots, loadBotsConfig, SESSION_MS, OVERLAP_MS, DEADMAN_MS, DEADMAN_MAX_MS, WATCH_EVERY_MS, CUTS_IN_A_ROW, PROVEN_MS, NEXT_MS, JOIN_POLL_MS, BACKOFF_MS,
+  type FleetHost, type FleetKit
+} from '../src/fleet.js';
 import { tokenToRaw, usdcToRaw, P2P_TOKENS, type HostedKitOptions, type LocalOffer, type LocalTrade, type OfferInput, type Policy, type Trade } from '../../src/index.js';
 
 const T0 = 1_790_000_000_000;
@@ -21,7 +25,8 @@ class VTime {
   now = (): number => this.ms;
   sleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promise<void>((resolve) => {
     if (signal?.aborted) { resolve(); return; }
-    if (!(ms > 0)) { setImmediate(resolve); return; }
+    // A wait of 0 ends at once, as the Worker's own does (src/board.ts sleep).
+    if (!(ms > 0)) { resolve(); return; }
     const t = { at: this.ms + ms, done: () => { signal?.removeEventListener('abort', t.done); this.#timers = this.#timers.filter((x) => x !== t); resolve(); } };
     this.#timers.push(t);
     signal?.addEventListener('abort', t.done, { once: true });
@@ -62,7 +67,8 @@ class FakeKit {
   /** How often the balances and the board's word on an offer were read. */
   reads = { balances: 0, readFunds: 0, heartbeat: 0 };
   #next = 1;
-  constructor(readonly clock: () => number, network: 'devnet' | 'mainnet', readonly sleep: (ms: number) => Promise<void> = async () => {}) { this.network = network; }
+  /** How its run() waits (a last step finishing): the waits of the world that runs it, so that a cut stops them too. */
+  constructor(readonly clock: () => number, network: 'devnet' | 'mainnet', public sleep: (ms: number) => Promise<void> = async () => {}) { this.network = network; }
   count(fn: string): number { return this.calls.filter((c) => c.fn === fn).length; }
   #call(fn: string, arg?: unknown) { this.calls.push({ fn, arg, at: this.clock() }); }
   readonly board = {
@@ -78,7 +84,8 @@ class FakeKit {
   };
   readonly store = {
     listOffers: async () => this.offers.map((o) => ({ ...o })),
-    listTrades: async () => this.trades.map((t) => ({ ...t }))
+    listTrades: async () => this.trades.map((t) => ({ ...t })),
+    listPending: async () => []
   };
   readonly pha = {
     balances: async () => {
@@ -133,9 +140,21 @@ class FakeKit {
 const SELL = { symbol: 'TAZ', total: '30', min: '1', max: '5', price: '1.08' };
 
 interface World {
-  vt: VTime; fleet: Fleet; host: FleetHost & { alarmAt: number | null; lines: string[] };
+  vt: VTime; fleet: Fleet;
+  /**
+   * `alarms`: every time the alarm was set, in order. `failAlarms`: the next so many setAlarm calls fail. `puts`: every
+   * key written to the key-value storage, in order. `failPuts`: the next so many writes of the key named fail.
+   */
+  host: FleetHost & { alarmAt: number | null; lines: string[]; alarms: number[]; failAlarms: number; puts: string[]; failPuts: { key: string; times: number } | null };
   kits: Map<string, FakeKit>; opts: HostedKitOptions[]; failNext: Error[];
   db: DatabaseSync; kvMap: Map<string, unknown>;
+  /**
+   * Cuts this world off in the middle of whatever it does, as a deploy cuts an object off: nothing of it runs on
+   * (none of its waits ever ends, its kits' among them), and whatever of it still reached for the storage or the
+   * alarm would throw, as it does for an object that was reset. Its storage and its alarm stay:
+   * `world(bots, env, w)` is the object after it.
+   */
+  cut(): void;
 }
 
 /** A fleet on a fake Durable Object. `bots` is bots.json; `env` its vars and secrets; `redeployOf`: the same object's storage, after a deploy. */
@@ -146,19 +165,37 @@ function world(bots: Record<string, unknown>, env: Record<string, unknown> = {},
   const kits = redeployOf?.kits ?? new Map<string, FakeKit>();
   const opts: HostedKitOptions[] = [];
   const failNext: Error[] = [];
+  let cutOff = false;
+  const never = new Promise<void>(() => {});
+  /** An object that was reset reaches its storage no more: a test in which it tries fails loudly. */
+  const alive = () => { if (cutOff) throw new Error('this object was cut off: it reaches its storage no more'); };
   const host = {
     alarmAt: null as number | null,
     lines: [] as string[],
-    sql: { exec: (q: string, ...b: Array<string | number | null>) => { const rows = db.prepare(q).all(...b); return { toArray: () => rows }; } },
+    alarms: [] as number[],
+    failAlarms: 0,
+    puts: [] as string[],
+    failPuts: null as { key: string; times: number } | null,
+    sql: { exec: (q: string, ...b: Array<string | number | null>) => { alive(); const rows = db.prepare(q).all(...b); return { toArray: () => rows }; } },
     kv: {
-      get: (k: string) => (kv.has(k) ? structuredClone(kv.get(k)) : undefined),
-      put: (k: string, v: unknown) => { kv.set(k, structuredClone(v)); },
-      delete: (k: string) => kv.delete(k),
-      keys: (prefix: string) => [...kv.keys()].filter((k) => k.startsWith(prefix)).sort()
+      get: (k: string) => { alive(); return kv.has(k) ? structuredClone(kv.get(k)) : undefined; },
+      put: (k: string, v: unknown) => {
+        alive();
+        if (host.failPuts && host.failPuts.key === k && host.failPuts.times > 0) { host.failPuts.times--; throw new Error('the storage did not take the write'); }
+        host.puts.push(k);
+        kv.set(k, structuredClone(v));
+      },
+      delete: (k: string) => { alive(); return kv.delete(k); },
+      keys: (prefix: string) => { alive(); return [...kv.keys()].filter((k) => k.startsWith(prefix)).sort(); }
     },
-    setAlarm(at: number) { this.alarmAt = at; },
-    getAlarm() { return this.alarmAt; },
-    deleteAlarm() { this.alarmAt = null; },
+    setAlarm(at: number) {
+      alive();
+      if (this.failAlarms > 0) { this.failAlarms--; throw new Error('the storage did not answer'); }
+      this.alarms.push(at);
+      this.alarmAt = at;
+    },
+    getAlarm() { alive(); return this.alarmAt; },
+    deleteAlarm() { alive(); this.alarmAt = null; },
     env: { CONTROL_TOKEN: 'c'.repeat(40), KIT_ALLOW_MAINNET: '0', MARKET_PHA_KEY: '{"wif":"x"}', MARKET_BASE_KEY: '{"privateKey":"y"}', ...env },
     async makeKit(o: HostedKitOptions): Promise<FleetKit> {
       opts.push(o);
@@ -166,16 +203,23 @@ function world(bots: Record<string, unknown>, env: Record<string, unknown> = {},
       if (failure) throw failure;
       const name = (o.store as unknown as { where: string }).where.replace(/^durable-object:/, '').split('/')[0]!;
       let k = kits.get(name);
-      if (!k) { k = new FakeKit(vt.now, o.network, (ms) => vt.sleep(ms)); kits.set(name, k); }
+      if (!k) { k = new FakeKit(vt.now, o.network, (ms) => host.sleep(ms)); kits.set(name, k); }
       return k as unknown as FleetKit;
     },
     now: vt.now,
-    sleep: vt.sleep,
+    sleep: (ms: number, signal?: AbortSignal): Promise<void> => (cutOff ? never : vt.sleep(ms, signal).then(() => (cutOff ? never : undefined))),
     print(line: string) { this.lines.push(line); }
   };
   if (redeployOf) host.alarmAt = redeployOf.host.alarmAt;
+  // The kits of the object before this one are this one's now: what they wait for from here on is this world's.
+  for (const k of kits.values()) k.sleep = (ms) => host.sleep(ms);
   const fleet = new Fleet(host, loadBots(bots));
-  return { vt, fleet, host, kits, opts, failNext, db, kvMap: kv };
+  const cut = () => {
+    cutOff = true;
+    // Its kits' run() ended with it, without a word.
+    for (const k of kits.values()) k.running = false;
+  };
+  return { vt, fleet, host, kits, opts, failNext, db, kvMap: kv, cut };
 }
 
 const devnetBot = (o: Record<string, unknown> = {}) => ({ network: 'devnet', offers: [SELL], ...o });
@@ -494,6 +538,569 @@ describe('sessions: an alarm runs every running bot for SESSION_MS, then sets th
   });
 });
 
+describe('the watchdog: an alarm at work keeps the alarm ahead of itself, so a session cut off is soon followed', () => {
+  const ahead = (w: World) => w.host.alarmAt! - w.vt.now();
+  const cutLines = (w: World) => w.host.lines.filter((l) => /was cut off in the middle of a session/.test(l));
+
+  test('the alarm is moved on every WATCH_EVERY_MS and is never more than DEADMAN_MS ahead; the session\'s end sets the next one', async () => {
+    const w = world({ market: devnetBot() });
+    await w.fleet.start('market');
+    const a = w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.equal(w.host.alarmAt, T0 + DEADMAN_MS);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 0 }, 'its note, in storage while it is at work');
+    for (let t = 1_000; t + 3_000 < SESSION_MS; t += 3_000) {
+      await w.vt.advance(3_000);
+      assert.ok(ahead(w) <= DEADMAN_MS, 'never further ahead than DEADMAN_MS');
+      assert.ok(ahead(w) > DEADMAN_MS - WATCH_EVERY_MS - JOIN_POLL_MS, `never left behind (${ahead(w)} ms ahead)`);
+    }
+    // One move per WATCH_EVERY_MS, not one per turn of its loop: each is a write to the object's storage.
+    const moves = w.host.alarms.filter((at) => at > T0 + DEADMAN_MS).length;
+    assert.ok(moves >= SESSION_MS / WATCH_EVERY_MS - 2 && moves <= SESSION_MS / WATCH_EVERY_MS, `${moves} moves in one session`);
+    // The start's alarm, the alarm's first, then one every WATCH_EVERY_MS.
+    assert.deepEqual(w.host.alarms.slice(0, 5), [T0 + NEXT_MS, ...[0, 1, 2, 3].map((i) => T0 + i * WATCH_EVERY_MS + DEADMAN_MS)]);
+    await w.vt.advance(10_000);
+    await a;
+    assert.ok(w.host.alarmAt !== null && w.host.alarmAt <= w.vt.now() + NEXT_MS, 'the next session within a second of this one\'s end');
+    assert.equal(w.kvMap.has('work'), false, 'its note is gone: it reached its end');
+    assert.equal(cutLines(w).length, 0);
+    assert.equal(w.host.puts.filter((k) => k === 'work').length, 1, 'the note is written once: an alarm that follows no cut has no count to set back');
+  });
+
+  test('a session cut off (a deploy) is followed by the next within DEADMAN_MS: nothing is listed twice, and its lines say what happened', async () => {
+    const bots = { market: devnetBot() };
+    const w = world(bots);
+    await w.fleet.start('market');
+    void w.fleet.alarm();
+    await w.vt.advance(95_000);
+    const kit = w.kits.get('market')!;
+    assert.equal(kit.count('postOffer'), 1);
+    assert.equal(kit.running, true);
+    // The cut: the object is gone in the middle of its session. Its storage stays, and the alarm in it.
+    w.cut();
+    const cutAt = w.vt.now();
+    const w2 = world(bots, {}, w);
+    assert.ok(w2.host.alarmAt! > cutAt + DEADMAN_MS - WATCH_EVERY_MS - JOIN_POLL_MS && w2.host.alarmAt! <= cutAt + DEADMAN_MS, 'the alarm in storage: at most DEADMAN_MS after the cut');
+    await w2.vt.advance(w2.host.alarmAt! - cutAt);
+    const b = w2.fleet.alarm();
+    await w2.vt.advance(1_000);
+    assert.equal(kit.count('run'), 2, 'the next session runs the bot again');
+    assert.equal(kit.running, true);
+    assert.equal(kit.count('postOffer'), 1, 'its offer is still listed: nothing posted twice');
+    assert.equal(kit.count('cancelOffer'), 0);
+    assert.equal(cutLines(w2).length, 1);
+    assert.match(cutLines(w2)[0]!, /^\[market\] \S+ \[market\] The object was cut off in the middle of a session \(a deploy, or Cloudflare restarting it\): this session takes over\.$/);
+    assert.equal(ahead(w2), DEADMAN_MS - 1_000, 'and it keeps its own watchdog, as long as the first');
+    assert.deepEqual(w2.kvMap.get('work'), { cuts: 1 });
+    await w2.vt.advance(PROVEN_MS - 3_000);
+    assert.deepEqual(w2.kvMap.get('work'), { cuts: 1 }, 'still counted two seconds before it has run for PROVEN_MS');
+    await w2.vt.advance(2_000);
+    assert.deepEqual(w2.kvMap.get('work'), { cuts: 0 }, 'it has run for PROVEN_MS: the count starts again');
+    assert.equal(w2.host.lines.filter((l) => /No cut for/.test(l)).length, 0, 'its watchdog was short all along: nothing to say');
+    await w2.vt.advance(SESSION_MS + 5_000 - PROVEN_MS);
+    await b;
+    assert.equal(w2.kvMap.has('work'), false);
+    // The session after it follows one that reached its end: it has nothing to say.
+    await session(w2);
+    assert.equal(cutLines(w2).length, 1);
+    assert.equal(kit.count('run'), 3);
+    assert.equal(kit.count('postOffer'), 1);
+    assert.equal(w.host.alarms.length < 12, true, 'the object that was cut off set no alarm after its cut');
+  });
+
+  test('sessions cut off one after another come further apart, up to DEADMAN_MAX_MS; one that reaches its end clears the count', async () => {
+    const bots = { market: devnetBot() };
+    let w = world(bots);
+    await w.fleet.start('market');
+    const aheads: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      void w.fleet.alarm();
+      await w.vt.advance(1_000);
+      aheads.push(ahead(w) + 1_000);
+      // An alarm that came while this one is at work would move the watchdog on by the same distance, and no more.
+      await w.fleet.alarm();
+      assert.equal(ahead(w), aheads[i]);
+      // Its moves keep that distance.
+      await w.vt.advance(25_000);
+      assert.ok(ahead(w) <= aheads[i]! && ahead(w) > aheads[i]! - WATCH_EVERY_MS - JOIN_POLL_MS, `alarm ${i}: ${ahead(w)} ms ahead`);
+      w.cut();
+      w = world(bots, {}, w);
+    }
+    const D = DEADMAN_MS;
+    assert.equal(CUTS_IN_A_ROW, 3);
+    assert.deepEqual(aheads, [D, D, D, 2 * D, 4 * D, 8 * D, 16 * D, DEADMAN_MAX_MS, DEADMAN_MAX_MS, DEADMAN_MAX_MS]);
+    assert.equal(DEADMAN_MAX_MS > 15 * 60_000, true, 'past an alarm\'s 15 minutes');
+    // The eleventh reaches its end.
+    const a = w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.equal(ahead(w) + 1_000, DEADMAN_MAX_MS);
+    assert.match(cutLines(w)[0]!, /\[market\] The object was cut off in the middle of a session 10 times in a row: this session takes over\. Should it be cut off within the next 60 s too, the next session starts only within 930 s of that; after them, within 30 s again\.$/);
+    await w.vt.advance(SESSION_MS + 5_000);
+    await a;
+    assert.ok(w.host.alarmAt !== null && w.host.alarmAt <= w.vt.now() + NEXT_MS);
+    const b = w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.equal(ahead(w) + 1_000, D, 'the count is cleared: the watchdog is short again');
+    assert.equal(cutLines(w).length, 1);
+    await w.vt.advance(SESSION_MS + 5_000);
+    await b;
+  });
+
+  test('an alarm that has been at work for PROVEN_MS sets the count back: its long watchdog is short again at that very turn, and it says so', async () => {
+    const bots = { market: devnetBot() };
+    let w = world(bots);
+    await w.fleet.start('market');
+    // Four alarms cut off one after another, each 20 s in.
+    for (let i = 0; i < 4; i++) {
+      void w.fleet.alarm();
+      await w.vt.advance(20_000);
+      w.cut();
+      w = world(bots, {}, w);
+    }
+    const startedAt = w.vt.now();
+    void w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.equal(ahead(w) + 1_000, 4 * DEADMAN_MS);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 4 });
+    assert.match(cutLines(w)[0]!, /The object was cut off in the middle of a session 4 times in a row: this session takes over\. Should it be cut off within the next 60 s too, the next session starts only within 120 s of that; after them, within 30 s again\.$/);
+    const proven = (x: World) => x.host.lines.filter((l) => /No cut for/.test(l));
+    // Two moves fail (at 10 s and 12 s), so the moves that follow come at 14 s, 24 s, ... 54 s, 64 s: none at 60 s.
+    await w.vt.advance(8_000);
+    w.host.failAlarms = 2;
+    await w.vt.advance(6_000);
+    assert.equal(w.host.alarmAt, startedAt + 14_000 + 4 * DEADMAN_MS);
+    await w.vt.advance(PROVEN_MS - 3_000 - 14_000 - 4_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 4 }, 'six seconds before PROVEN_MS it still counts');
+    assert.ok(ahead(w) > 4 * DEADMAN_MS - WATCH_EVERY_MS - JOIN_POLL_MS, 'with its long watchdog');
+    assert.equal(proven(w).length, 0);
+    await w.vt.advance(4_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 4 }, 'and two seconds before it');
+    assert.equal(proven(w).length, 0);
+    await w.vt.advance(2_000);
+    assert.equal(w.vt.now(), startedAt + PROVEN_MS);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 0 }, 'at PROVEN_MS the count starts again');
+    assert.equal(ahead(w), DEADMAN_MS, 'and the alarm is moved to the short distance at that very turn');
+    assert.equal(proven(w).length, 1);
+    assert.match(proven(w)[0]!, /^\[market\] \S+ \[market\] No cut for 60 s: should the object be cut off now, the next session starts within 30 s again\.$/);
+    // It stays short, and says it once.
+    for (let i = 0; i < 10; i++) {
+      await w.vt.advance(3_000);
+      assert.ok(ahead(w) <= DEADMAN_MS && ahead(w) > DEADMAN_MS - WATCH_EVERY_MS - JOIN_POLL_MS, `${ahead(w)} ms ahead`);
+    }
+    assert.equal(proven(w).length, 1);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 0 });
+    assert.equal(w.host.puts.filter((k) => k === 'work').length, 2, 'the note was written twice: at the alarm\'s start, and when the count was set back');
+    // An alarm that came meanwhile would move the watchdog on by the short distance too.
+    await w.fleet.alarm();
+    assert.equal(ahead(w), DEADMAN_MS);
+    // Cut off now, it is the first of a new count.
+    w.cut();
+    const cutAt = w.vt.now();
+    w = world(bots, {}, w);
+    assert.ok(w.host.alarmAt! > cutAt && w.host.alarmAt! <= cutAt + DEADMAN_MS);
+    void w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 1 });
+    assert.equal(ahead(w) + 1_000, DEADMAN_MS);
+    assert.match(cutLines(w)[0]!, /The object was cut off in the middle of a session \(a deploy, or Cloudflare restarting it\): this session takes over\.$/);
+  });
+
+  test('a note that cannot be written when the count is to be set back changes nothing: the sessions run on, and the next turn sets it back', async () => {
+    const bots = { market: devnetBot() };
+    let w = world(bots);
+    await w.fleet.start('market');
+    for (let i = 0; i < 4; i++) {
+      void w.fleet.alarm();
+      await w.vt.advance(20_000);
+      w.cut();
+      w = world(bots, {}, w);
+    }
+    let failed: unknown = null;
+    const a = w.fleet.alarm().catch((e: unknown) => { failed = e; });
+    await w.vt.advance(PROVEN_MS - 1_000);
+    w.host.failPuts = { key: 'work', times: 2 };
+    await w.vt.advance(1_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 4 }, 'the write at 60 s failed');
+    assert.ok(ahead(w) > DEADMAN_MS, 'so its watchdog is still the long one');
+    assert.equal(w.kits.get('market')!.running, true, 'and its session runs on');
+    await w.vt.advance(2_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 4 }, 'so did the one at 62 s');
+    await w.vt.advance(2_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 0 }, 'the one at 64 s is kept');
+    assert.equal(ahead(w), DEADMAN_MS);
+    assert.equal(w.host.lines.filter((l) => /No cut for/.test(l)).length, 1, 'said once, when it was so');
+    assert.equal(failed, null);
+    await w.vt.advance(SESSION_MS);
+    await a;
+    assert.equal(failed, null);
+    assert.equal(w.kvMap.has('work'), false);
+  });
+
+  test('deploys a few minutes apart are each followed within DEADMAN_MS, however many: each cuts a session that had shown it runs', async () => {
+    const bots = { market: devnetBot() };
+    /** The object as the platform runs it, until `until`: its alarm fires when it is due, one at a time. */
+    const drive = async (x: World, until: number): Promise<void> => {
+      let atWork = false;
+      while (x.vt.now() < until) {
+        if (!atWork && x.host.alarmAt !== null && x.host.alarmAt <= x.vt.now()) {
+          atWork = true;
+          void x.fleet.alarm().then(() => { atWork = false; });
+        }
+        await x.vt.advance(1_000);
+      }
+    };
+    let w = world(bots);
+    await w.fleet.start('market');
+    const waits: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      await drive(w, w.vt.now() + 5 * 60_000);
+      assert.deepEqual(w.kvMap.get('work'), { cuts: 0 }, `deploy ${i + 1} cuts a session that has run for over a minute: nothing is counted`);
+      w.cut();
+      const cutAt = w.vt.now();
+      w = world(bots, {}, w);
+      waits.push(w.host.alarmAt! - cutAt);
+    }
+    assert.ok(waits.every((ms) => ms > 0 && ms <= DEADMAN_MS), `the next session after each of 8 deploys: ${waits.map((ms) => ms / 1000).join(', ')} s`);
+    const kit = w.kits.get('market')!;
+    assert.equal(kit.count('run'), 8, 'one session per deploy so far');
+    assert.equal(kit.count('postOffer'), 1, 'and its offer was listed once');
+    await drive(w, w.vt.now() + 60_000);
+    assert.equal(kit.count('run'), 9);
+    assert.match(cutLines(w)[0]!, /The object was cut off in the middle of a session \(a deploy/);
+  });
+
+  test('the second cut in a row says so; its watchdog is as short as ever, so it says no more', async () => {
+    const bots = { market: devnetBot() };
+    let w = world(bots);
+    await w.fleet.start('market');
+    for (let i = 0; i < 2; i++) {
+      void w.fleet.alarm();
+      await w.vt.advance(40_000);
+      w.cut();
+      w = world(bots, {}, w);
+    }
+    void w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.match(cutLines(w)[0]!, /\[market\] The object was cut off in the middle of a session 2 times in a row: this session takes over\.$/);
+    assert.equal(ahead(w) + 1_000, DEADMAN_MS);
+  });
+
+  test('the watchdog is kept after the session\'s end too: through a last step of five minutes, and through an extra session\'s own last step', async () => {
+    const held = (w: World, when: string) => assert.ok(ahead(w) <= DEADMAN_MS && ahead(w) > DEADMAN_MS - WATCH_EVERY_MS - JOIN_POLL_MS, `${when}: ${ahead(w)} ms ahead at +${w.vt.now() - T0} ms`);
+    // One bot whose last step takes five minutes: far past the session's end, and past the extra sessions' time.
+    const one = world({ market: devnetBot() });
+    await one.fleet.start('market');
+    const a = one.fleet.alarm();
+    await one.vt.advance(1_000);
+    one.kits.get('market')!.windDownMs = 5 * 60_000;
+    let done = false;
+    void a.then(() => { done = true; });
+    await one.vt.advance(SESSION_MS - 1_000);
+    for (let t = 0; t + 3_000 < 5 * 60_000; t += 3_000) {
+      await one.vt.advance(3_000);
+      assert.equal(done, false, 'the alarm is still at work');
+      held(one, 'a last step');
+    }
+    assert.ok(one.vt.now() > T0 + SESSION_MS + OVERLAP_MS);
+    await one.vt.advance(10_000);
+    await a;
+    assert.ok(one.host.alarmAt !== null && one.host.alarmAt <= one.vt.now() + NEXT_MS);
+    assert.equal(one.kvMap.has('work'), false);
+    // Two bots: the buyer's session ends, it goes on in an extra session while the seller finishes its last step
+    // (90 s), and that extra session then has a last step of its own (60 s more), with no regular session left.
+    const two = world({ seller: devnetBot(), buyer: devnetBot({ offers: [], bids: [SELL] }) },
+      { SELLER_PHA_KEY: '{}', SELLER_BASE_KEY: '{}', BUYER_PHA_KEY: '{}', BUYER_BASE_KEY: '{}' });
+    const t0 = two.vt.now();
+    await two.fleet.start('seller');
+    await two.fleet.start('buyer');
+    const b = two.fleet.alarm();
+    await two.vt.advance(5_000);
+    two.kits.get('seller')!.windDownMs = 90_000;
+    two.kits.get('buyer')!.windDownMs = 60_000;
+    let over = false;
+    void b.then(() => { over = true; });
+    await two.vt.advance(SESSION_MS - 5_000);
+    for (let t = 0; t + 3_000 < 150_000; t += 3_000) {
+      await two.vt.advance(3_000);
+      assert.equal(over, false, `still at work ${t + 3_000} ms after the session's end`);
+      assert.ok(ahead(two) <= DEADMAN_MS && ahead(two) > DEADMAN_MS - WATCH_EVERY_MS - JOIN_POLL_MS, `${ahead(two)} ms ahead at +${two.vt.now() - t0} ms`);
+    }
+    assert.equal(two.kits.get('buyer')!.count('run'), 2, 'the buyer had an extra session');
+    await two.vt.advance(10_000);
+    await b;
+    assert.ok(two.host.alarmAt !== null && two.host.alarmAt <= two.vt.now() + NEXT_MS);
+  });
+
+  test('a session cut off while a bot finishes its last step: the next takes over, and nothing of the one cut off runs on', async () => {
+    const bots = { market: devnetBot() };
+    const w = world(bots);
+    await w.fleet.start('market');
+    void w.fleet.alarm();
+    await w.vt.advance(1_000);
+    const kit = w.kits.get('market')!;
+    kit.windDownMs = 3 * 60_000;
+    await w.vt.advance(SESSION_MS + 20_000);
+    assert.equal(kit.running, true, 'its last step is still under way, 21 s after the session\'s end');
+    assert.ok(ahead(w) > 0 && ahead(w) <= DEADMAN_MS);
+    w.cut();
+    const cutAt = w.vt.now();
+    const w2 = world(bots, {}, w);
+    assert.ok(w2.host.alarmAt! > cutAt && w2.host.alarmAt! <= cutAt + DEADMAN_MS);
+    await w2.vt.advance(w2.host.alarmAt! - cutAt);
+    const b = w2.fleet.alarm();
+    await w2.vt.advance(1_000);
+    assert.deepEqual(w2.kvMap.get('work'), { cuts: 1 });
+    assert.equal(kit.count('run'), 2);
+    assert.equal(kit.count('ended'), 0, 'the run() that was cut off never ended');
+    // Long after the last step of the session that was cut off would have ended, nothing of it has happened.
+    await w2.vt.advance(4 * 60_000);
+    assert.equal(kit.count('ended'), 0);
+    assert.equal(kit.running, true);
+    assert.deepEqual(w2.kvMap.get('work'), { cuts: 0 }, 'the note is the new alarm\'s own');
+    assert.equal(w.host.alarmAt! <= cutAt + DEADMAN_MS, true, 'and the object that was cut off set no alarm after its cut');
+    kit.windDownMs = 0;
+    await w2.vt.advance(SESSION_MS);
+    await b;
+    assert.equal(kit.count('ended'), 1);
+  });
+
+  test('the kits\' marks of signing flows under way are the instance\'s own: one set for all its kits, a new one for the object after a cut', async () => {
+    const bots = { market: devnetBot(), other: devnetBot() };
+    const env = { OTHER_PHA_KEY: '{}', OTHER_BASE_KEY: '{}' };
+    const w = world(bots, env);
+    await w.fleet.start('market');
+    assert.equal((await w.fleet.dryRun('other')).status, 200);
+    void w.fleet.alarm();
+    await w.vt.advance(20_000);
+    assert.equal(w.opts.length, 3, 'the start\'s preflight, the dry run and the session each built a kit');
+    const marks = w.opts[0]!.internals!.signGuards!;
+    assert.ok(marks.busy instanceof Set && marks.claiming instanceof Set);
+    assert.ok(w.opts.every((o) => o.internals!.signGuards === marks), 'every kit of the instance has the same marks');
+    // A flow under way when the object is cut off leaves its mark in that instance's marks, and only there.
+    marks.busy.add('devnet:7');
+    w.cut();
+    const w2 = world(bots, env, w);
+    void w2.fleet.alarm();
+    await w2.vt.advance(1_000);
+    const next = w2.opts[0]!.internals!.signGuards!;
+    assert.notEqual(next, marks, 'the object after the cut has marks of its own');
+    assert.equal(next.busy.size + next.claiming.size, 0, 'with nothing under way');
+    assert.ok(w2.opts.every((o) => o.internals!.signGuards === next));
+  });
+
+  test('a halt in the same turn as an alarm\'s start leaves the alarm to it', async () => {
+    const w = world({ seller: devnetBot(), buyer: devnetBot({ offers: [], bids: [SELL] }) },
+      { SELLER_PHA_KEY: '{}', SELLER_BASE_KEY: '{}', BUYER_PHA_KEY: '{}', BUYER_BASE_KEY: '{}' });
+    await w.fleet.start('seller');
+    await w.fleet.start('buyer');
+    const a = w.fleet.alarm();
+    await w.fleet.halt('buyer');
+    assert.equal(w.host.alarmAt, T0 + DEADMAN_MS);
+    await w.vt.advance(SESSION_MS + 5_000);
+    await a;
+    assert.equal(w.kits.get('seller')!.count('run'), 1);
+  });
+
+  test('a cut is told to the bots whose session starts with the alarm that follows it, and the short watchdog to those in a session then', async () => {
+    const bots = { seller: devnetBot(), buyer: devnetBot({ offers: [], bids: [SELL] }), third: devnetBot() };
+    const env = { SELLER_PHA_KEY: '{}', SELLER_BASE_KEY: '{}', BUYER_PHA_KEY: '{}', BUYER_BASE_KEY: '{}', THIRD_PHA_KEY: '{}', THIRD_BASE_KEY: '{}' };
+    const of = (x: World, re: RegExp) => x.host.lines.filter((l) => re.test(l)).map((l) => l.slice(0, l.indexOf(']') + 1));
+    let w = world(bots, env);
+    await w.fleet.start('seller');
+    await w.fleet.start('third');
+    // Four cuts in a row, 20 s apart. The buyer is never started; the third bot's session fails in the fourth alarm,
+    // so it waits a minute before its next try.
+    for (let i = 0; i < 4; i++) {
+      if (i === 3) w.failNext.push(new Error('the Base RPC does not answer'));
+      void w.fleet.alarm();
+      await w.vt.advance(20_000);
+      w.cut();
+      w = world(bots, env, w);
+    }
+    const st = () => Object.fromEntries((w.fleet.status().body.bots as Array<{ name: string; mode: string; retryAt?: string }>).map((b) => [b.name, b.retryAt ? 'waits' : b.mode]));
+    assert.deepEqual(st(), { seller: 'waits', buyer: 'stopped', third: 'running' }, 'the kit that could not be built was the first one asked for: the seller\'s');
+    void w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.deepEqual(of(w, /was cut off in the middle of a session 4 times in a row/), ['[third]'], 'the buyer is stopped, and the seller has no session until its wait is over');
+    // The seller's wait is over 60 s after its failure, 40 s into this alarm; its kit cannot be built again, so it
+    // waits on. At 60 s the watchdog is short again: said to the bot that is in a session, and to no other.
+    w.failNext.push(new Error('the Base RPC does not answer'));
+    await w.vt.advance(59_000);
+    assert.deepEqual(st(), { seller: 'waits', buyer: 'stopped', third: 'running' });
+    assert.deepEqual(of(w, /No cut for 60 s/), ['[third]']);
+    // Its second wait (two minutes) over, the seller joins the alarm at work: it is told nothing of the cuts, which
+    // are no longer what this alarm follows.
+    await w.vt.advance(120_000);
+    assert.equal(w.kits.get('seller')!.running, true);
+    assert.deepEqual(of(w, /was cut off in the middle/), ['[third]']);
+    assert.deepEqual(of(w, /No cut for 60 s/), ['[third]']);
+    assert.equal(w.kits.get('buyer'), undefined);
+  });
+
+  test('the short watchdog is said once the alarm has been moved to it, not before: a move that fails at that turn is tried again, and then it is said', async () => {
+    const bots = { market: devnetBot() };
+    let w = world(bots);
+    await w.fleet.start('market');
+    for (let i = 0; i < 4; i++) {
+      void w.fleet.alarm();
+      await w.vt.advance(20_000);
+      w.cut();
+      w = world(bots, {}, w);
+    }
+    void w.fleet.alarm();
+    await w.vt.advance(PROVEN_MS - 1_000);
+    const said = () => w.host.lines.filter((l) => /No cut for/.test(l)).length;
+    w.host.failAlarms = 2;
+    await w.vt.advance(1_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 0 }, 'the count is set back at 60 s');
+    assert.ok(ahead(w) > DEADMAN_MS, 'but the move failed: the alarm is still far');
+    assert.equal(said(), 0, 'so nothing is said yet');
+    await w.vt.advance(2_000);
+    assert.ok(ahead(w) > DEADMAN_MS);
+    assert.equal(said(), 0);
+    await w.vt.advance(2_000);
+    assert.equal(ahead(w), DEADMAN_MS, 'the move at 64 s is kept');
+    assert.equal(said(), 1);
+    await w.vt.advance(30_000);
+    assert.equal(said(), 1);
+  });
+
+  test('while an alarm is at work a start, a stop, a halt and the cron leave the alarm to it; it sets the next one, or none, as it ends', async () => {
+    const w = world({ seller: devnetBot(), buyer: devnetBot({ offers: [], bids: [SELL] }) },
+      { SELLER_PHA_KEY: '{}', SELLER_BASE_KEY: '{}', BUYER_PHA_KEY: '{}', BUYER_BASE_KEY: '{}' });
+    await w.fleet.start('seller');
+    assert.equal(w.host.alarmAt, T0 + NEXT_MS, 'no alarm at work: the start sets the alarm');
+    const a = w.fleet.alarm();
+    await w.vt.advance(5_000);
+    const watchdog = T0 + DEADMAN_MS;
+    assert.equal(w.host.alarmAt, watchdog);
+    await w.fleet.start('buyer');
+    assert.equal(w.host.alarmAt, watchdog, 'a start leaves the alarm where it is');
+    await w.vt.advance(JOIN_POLL_MS);
+    assert.equal(w.kits.get('buyer')!.count('run'), 1, 'and the alarm at work takes the bot in');
+    await w.fleet.stop('seller');
+    assert.equal(w.host.alarmAt, watchdog, 'so does a stop');
+    await w.fleet.wake();
+    assert.equal(w.host.alarmAt, watchdog, 'and the cron');
+    // Should the alarm ever read as none while one is at work, the cron still leaves it: the next move sets it.
+    w.host.alarmAt = null;
+    await w.fleet.wake();
+    assert.equal(w.host.alarmAt, null);
+    await w.vt.advance(WATCH_EVERY_MS);
+    assert.ok(ahead(w) > DEADMAN_MS - WATCH_EVERY_MS - JOIN_POLL_MS && ahead(w) <= DEADMAN_MS);
+    const before = w.host.alarmAt;
+    await w.fleet.halt('buyer');
+    assert.equal(w.host.alarmAt, before, 'and a halt');
+    await w.vt.advance(5_000);
+    await a;
+    const modes = Object.fromEntries((w.fleet.status().body.bots as Array<{ name: string; mode: string }>).map((b) => [b.name, b.mode]));
+    assert.deepEqual(modes, { seller: 'stopped', buyer: 'stopped' });
+    assert.equal(w.host.alarmAt, null, 'every bot is stopped as it ends: no alarm');
+    assert.equal(w.kvMap.has('work'), false);
+    // With no alarm at work a start sets the alarm itself again.
+    await w.fleet.start('seller');
+    assert.equal(w.host.alarmAt, w.vt.now() + NEXT_MS);
+  });
+
+  test('a move of the watchdog that fails is tried again at the next turn; the session goes on', async () => {
+    const w = world({ market: devnetBot() });
+    await w.fleet.start('market');
+    const a = w.fleet.alarm();
+    await w.vt.advance(9_000);
+    w.host.failAlarms = 2;
+    await w.vt.advance(2_000);
+    assert.equal(w.host.alarmAt, T0 + DEADMAN_MS, 'the move at 10 s failed: the alarm stays where it was');
+    await w.vt.advance(2_000);
+    assert.equal(w.host.alarmAt, T0 + DEADMAN_MS, 'and the one at 12 s');
+    await w.vt.advance(2_000);
+    assert.equal(w.host.failAlarms, 0);
+    assert.equal(w.host.alarmAt, T0 + 14_000 + DEADMAN_MS, 'the one at 14 s moved it');
+    assert.equal(w.kits.get('market')!.running, true);
+    await w.vt.advance(SESSION_MS);
+    await a;
+    const st = (w.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!;
+    assert.equal(st.lastError, undefined);
+    assert.equal(st.mode, 'running');
+    assert.ok(w.host.alarmAt !== null && w.host.alarmAt <= w.vt.now() + NEXT_MS);
+  });
+
+  test('a halt after a cut: no session takes over, and a later start has nothing cut off before it', async () => {
+    const bots = { market: devnetBot() };
+    const w = world(bots);
+    await w.fleet.start('market');
+    void w.fleet.alarm();
+    await w.vt.advance(20_000);
+    w.cut();
+    const w2 = world(bots, {}, w);
+    assert.equal(w2.kvMap.has('work'), true, 'the note of the alarm that was cut off');
+    await w2.fleet.halt('market');
+    assert.equal(w2.host.alarmAt, null);
+    assert.equal(w2.kvMap.has('work'), false, 'no bot runs: its note goes with the alarm');
+    await w2.fleet.start('market');
+    const b = w2.fleet.alarm();
+    await w2.vt.advance(1_000);
+    assert.equal(ahead(w2) + 1_000, DEADMAN_MS);
+    assert.deepEqual(w2.kvMap.get('work'), { cuts: 0 });
+    await w2.vt.advance(SESSION_MS + 5_000);
+    await b;
+    assert.equal(cutLines(w2).length, 0);
+  });
+
+  test('an alarm that cannot set its first alarm starts no session and counts as no cut: its note goes back to what it found', async () => {
+    const bots = { market: devnetBot() };
+    let w = world(bots);
+    await w.fleet.start('market');
+    // The storage fails as the alarm starts: its first setAlarm. Three times, as the platform tries an alarm that threw again.
+    for (let i = 0; i < 3; i++) {
+      w.host.failAlarms = 1;
+      await assert.rejects(w.fleet.alarm(), /the storage did not answer/);
+      assert.equal(w.kvMap.has('work'), false, 'no note: no session started');
+    }
+    assert.equal(w.opts.length, 1, 'no kit was built since the start\'s preflight');
+    // The object is no longer at work: the cron, finding no alarm, sets one (here the start's is still set).
+    assert.equal(w.host.alarmAt, T0 + NEXT_MS);
+    w.host.alarmAt = null;
+    await w.fleet.wake();
+    assert.equal(w.host.alarmAt, T0 + NEXT_MS);
+    void w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 0 });
+    assert.equal(cutLines(w).length, 0, 'and nothing is said of a cut');
+    assert.equal(w.kits.get('market')!.count('run'), 1);
+    // After real cuts the note it found is put back as it was: the count neither grows nor is lost.
+    for (let i = 0; i < 2; i++) {
+      await w.vt.advance(20_000);
+      w.cut();
+      w = world(bots, {}, w);
+      if (i === 0) void w.fleet.alarm();
+    }
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 1 });
+    w.host.failAlarms = 1;
+    await assert.rejects(w.fleet.alarm(), /the storage did not answer/);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 1 });
+    void w.fleet.alarm();
+    await w.vt.advance(1_000);
+    assert.deepEqual(w.kvMap.get('work'), { cuts: 2 });
+    assert.match(cutLines(w)[0]!, /cut off in the middle of a session 2 times in a row/);
+  });
+
+  test('whatever the note holds, it is a note: the alarm starts, and only a whole number in it counts', async () => {
+    const bots = { market: devnetBot() };
+    for (const [held, cuts] of [[null, 1], ['x', 1], [5, 1], [[], 1], [{}, 1], [{ cuts: 'a' }, 1], [{ cuts: -1 }, 1], [{ cuts: 1.5 }, 1], [{ cuts: 1e300 }, 1], [{ cuts: 2 }, 3], [{ cuts: 31 }, 30], [{ cuts: 0 }, 1]] as Array<[unknown, number]>) {
+      const w = world(bots);
+      await w.fleet.start('market');
+      w.kvMap.set('work', held);
+      const a = w.fleet.alarm();
+      await w.vt.advance(1_000);
+      assert.deepEqual(w.kvMap.get('work'), { cuts }, `a note of ${JSON.stringify(held)}`);
+      assert.equal(w.kits.get('market')!.count('run'), 1);
+      await w.fleet.halt('market');
+      await w.vt.advance(5_000);
+      await a;
+    }
+  });
+});
+
 describe('the dry run', () => {
   test('what a stopped bot would list and take, through read-only transports; refused while the bot runs', async () => {
     const w = world({ market: devnetBot({ take: { symbol: 'TAZ', amount: '2', maxPrice: '1.10', everyS: 120 } }) });
@@ -574,16 +1181,24 @@ describe('races and redeploys', () => {
     const kit = w.kits.get('market')!;
     assert.equal(kit.running, true);
     const second = w.fleet.alarm();
-    await w.vt.advance(5_000);
     await second;
+    assert.equal(w.host.alarmAt, w.vt.now() + DEADMAN_MS, 'it moved the watchdog on, and that is all');
+    await w.vt.advance(5_000);
     assert.equal(kit.count('run'), 1, 'no second session');
     const st = (w.fleet.status().body.bots as Array<Record<string, unknown>>)[0]!;
     assert.equal(st.lastError, undefined, 'and no failure (no store lock fought over)');
     assert.equal(st.sessionRunning, true, 'the first session is still the one stop and halt reach');
+    assert.equal(w.kvMap.has('work'), true, 'the note of the alarm at work is still there');
+    // The first alarm is still the one at work: it keeps its watchdog, and a control call still leaves the alarm to it.
+    await w.vt.advance(3 * WATCH_EVERY_MS);
+    assert.ok(w.host.alarmAt! - w.vt.now() > DEADMAN_MS - WATCH_EVERY_MS - JOIN_POLL_MS);
     await w.fleet.halt('market');
+    assert.ok(w.host.alarmAt! > w.vt.now() + NEXT_MS, 'the halt left the alarm to the alarm at work');
     await w.vt.advance(5_000);
     await first;
     assert.equal(kit.running, false);
+    assert.equal(w.host.alarmAt, null, 'which ended with no bot running: no alarm');
+    assert.equal(w.kvMap.has('work'), false);
   });
 
   test('a running bot whose entry leaves bots.json stops with the config it last ran with, then needs a new start; it never resumes on its own', async () => {

@@ -6,16 +6,32 @@
  * What a session is. A Durable Object has no process that runs for days: it
  * runs while a request or an alarm is in flight, and an alarm may run for 15
  * minutes at most. So the fleet runs the bots in sessions of SESSION_MS: an
- * alarm first sets the next alarm (a backstop, should the session be cut
- * off by a deploy or a runtime update), then builds each running bot's kit
- * (createHostedKit: its keys from the Worker's secrets, its records in this
- * object's SQLite), runs the runner's trading loop (examples/seller-bot.ts
- * trade(), the very loop of `npm run market`) until the session ends, closes
- * the kit, and sets the alarm of the next session a second later. Ending a
- * session is a pause, not a stop: nothing is cancelled; run() finishes the
- * step it is in, every trade stays in the store, and the next session's run()
- * resumes from it (pending creates and open sends settled first, as after
- * any restart) and sends its offers' heartbeats well inside their 90 s.
+ * alarm builds each running bot's kit (createHostedKit: its keys from the
+ * Worker's secrets, its records in this object's SQLite), runs the runner's
+ * trading loop (examples/seller-bot.ts trade(), the very loop of `npm run
+ * market`) until the session ends, closes the kit, and sets the alarm of
+ * the next session a second later. Ending a session is a pause, not a stop:
+ * nothing is cancelled; run() finishes the step it is in, every trade stays
+ * in the store, and the next session's run() resumes from it (pending
+ * creates and open sends settled first, as after any restart) and sends its
+ * offers' heartbeats well inside their 90 s.
+ *
+ * The watchdog. What cuts a session off (a deploy, a runtime update) takes
+ * everything the object holds in memory with it; its storage stays, and the
+ * alarm in it. So an alarm at work keeps the alarm DEADMAN_MS ahead of
+ * itself, moving it on every WATCH_EVERY_MS: after a cut the next session
+ * starts within DEADMAN_MS, while the offers are still listed, and resumes
+ * as after any restart. Sessions cut off one after another, each before it
+ * had run for PROVEN_MS, come further apart, up to DEADMAN_MAX_MS: whatever
+ * cuts every one of them as it starts is then met a few times an hour, not
+ * a hundred, and a bot that cannot stay up does not stay listed.
+ *
+ * A cut does not always end the Worker's process: Cloudflare can reset the
+ * object in place, and what a module keeps then outlives everything the
+ * object ran. So the fleet keeps nothing in a module, and the kit's marks
+ * of the signing flows under way (one per trade) are the fleet's own, new
+ * with each instance: a flow cut off with its session leaves no mark that
+ * would refuse that trade's next step for ever.
  *
  * A session's end waits for each bot's last step (a Base transaction can
  * take minutes to be mined). Meanwhile a bot whose session has already
@@ -46,7 +62,7 @@
  *   halt             stopped at once, its trades left where they are (as two Ctrl-C)
  * No call changes a config: the configs are bots.json, deployed with the Worker.
  */
-import { P2P_CONFIG, SqlBackend, networkProblem, tokenOf, type HostedKitOptions, type SqlDatabase } from '../../src/index.js';
+import { P2P_CONFIG, SqlBackend, networkProblem, tokenOf, newSignGuards, type HostedKitOptions, type SqlDatabase } from '../../src/index.js';
 import { redact } from '../../src/redact.js';
 import {
   parseHostedConfig, trade, printPreflight, dryRunRest, readOnlyTransports, explain, describeOffer, plainAmount, SESSION_PAUSED, SIZE_EVERY_S,
@@ -68,8 +84,34 @@ export const SESSION_MS = 6 * 60_000;
  * the end: the alarm's work stays well inside its 15 minutes.
  */
 export const OVERLAP_MS = 2 * 60_000;
-/** The alarm a session sets first: should the session be cut off, the next one still comes (the limit, and a little). */
-export const DEADMAN_MS = 15 * 60_000 + 30_000;
+/**
+ * The watchdog: an alarm at work keeps the alarm this far ahead of itself.
+ * Should its sessions be cut off (a deploy, a runtime update), the next ones
+ * start this soon after the cut at the latest (later only after cuts in a
+ * row, below). An offer has a heartbeat every 20 s and stays listed for
+ * 90 s without one, so the offers stay listed, and a trade under way is in
+ * hand again well before a deadline.
+ */
+export const DEADMAN_MS = 30_000;
+/** How often an alarm at work moves the alarm on (each move is one small write to the object's storage). */
+export const WATCH_EVERY_MS = 10_000;
+/**
+ * Cuts in a row: an alarm is cut off, and so is each one that follows it,
+ * before it has been at work for PROVEN_MS. The first CUTS_IN_A_ROW cuts of
+ * a row are each followed within DEADMAN_MS (deploys do come in a row). From
+ * then on the watchdog is twice as long after each further cut, up to
+ * DEADMAN_MAX_MS (an alarm's 15 minutes, and a little: what the wait was
+ * after every cut before the watchdog was short). An alarm that has been at
+ * work for PROVEN_MS has shown that the bots can run: the row is over, the
+ * count starts again (a cut of this alarm is the first of the next row), and
+ * its own watchdog is DEADMAN_MS from then on. So deploys a few minutes
+ * apart are each followed within DEADMAN_MS, however many, and only what
+ * cuts an alarm within its first minute, again and again, is met ever more
+ * rarely.
+ */
+export const CUTS_IN_A_ROW = 3;
+export const PROVEN_MS = 60_000;
+export const DEADMAN_MAX_MS = 15 * 60_000 + 30_000;
 /** The next session starts this soon after one ends. */
 export const NEXT_MS = 1_000;
 /** A bot started while a session runs joins it, while at least this much of it is left. */
@@ -89,6 +131,9 @@ export interface FleetTiming {
   sessionMs: number;
   overlapMs: number;
   deadmanMs: number;
+  deadmanMaxMs: number;
+  provenMs: number;
+  watchEveryMs: number;
   nextMs: number;
   minJoinMs: number;
   joinPollMs: number;
@@ -97,7 +142,8 @@ export interface FleetTiming {
 }
 
 const TIMING: FleetTiming = Object.freeze({
-  sessionMs: SESSION_MS, overlapMs: OVERLAP_MS, deadmanMs: DEADMAN_MS, nextMs: NEXT_MS, minJoinMs: MIN_JOIN_MS, joinPollMs: JOIN_POLL_MS, backoffMs: BACKOFF_MS, backoffMaxMs: BACKOFF_MAX_MS
+  sessionMs: SESSION_MS, overlapMs: OVERLAP_MS, deadmanMs: DEADMAN_MS, deadmanMaxMs: DEADMAN_MAX_MS, provenMs: PROVEN_MS, watchEveryMs: WATCH_EVERY_MS, nextMs: NEXT_MS,
+  minJoinMs: MIN_JOIN_MS, joinPollMs: JOIN_POLL_MS, backoffMs: BACKOFF_MS, backoffMaxMs: BACKOFF_MAX_MS
 });
 
 /** What the fleet needs of a kit: what the runner uses (BotKit), and the kit's addresses. */
@@ -250,6 +296,17 @@ class Signals implements SignalSource {
 
 interface Live { readonly end: AbortController; readonly signals: Signals; readonly startedAt: number }
 
+/**
+ * The note an alarm keeps in the object's storage while it is at work (kv `work`), and removes at its end. An alarm
+ * that finds one at its start comes after one that never reached its end: its sessions were cut off. `cuts` counts
+ * the alarms cut off one after another before the one at work; an alarm that has been at work for PROVEN_MS sets
+ * it back to 0.
+ */
+interface Work { cuts: number }
+const WORK = 'work';
+/** The count of cuts in a row stops here: far past where the watchdog has reached DEADMAN_MAX_MS. */
+const CUTS_COUNTED = 30;
+
 const usdcOf = (cfg: HostedBotConfig) => P2P_CONFIG[cfg.network].base.usdcSymbol;
 
 /**
@@ -281,6 +338,13 @@ export class Fleet {
   readonly #busy = new Set<string>();
   readonly #startedAt: number;
   readonly #t: FleetTiming;
+  /** The alarm at work in this instance, with how far ahead of itself it keeps the alarm (now); null between alarms. */
+  #work: { deadmanMs: number } | null = null;
+  /**
+   * The marks of the signing flows under way in this instance's kits. This instance's own, not the module's: an
+   * object reset in place keeps its modules, and a flow that was cut off with it never removes its mark.
+   */
+  readonly #signGuards = newSignGuards();
 
   constructor(host: FleetHost, bots: Bots) {
     this.#host = host;
@@ -403,7 +467,7 @@ export class Fleet {
       log: o.log,
       // No long-polls: a Worker holds at most six requests waiting for their answer's headers at once, and a held
       // long-poll would make a chain read wait behind it. Plain polls every 5 s keep the offers listed (90 s).
-      internals: { pollWaitS: 0, argv: [], ...this.#fetches(), ...(o.internals ?? {}) }
+      internals: { pollWaitS: 0, argv: [], signGuards: this.#signGuards, ...this.#fetches(), ...(o.internals ?? {}) }
     };
   }
 
@@ -553,8 +617,13 @@ export class Fleet {
     });
   }
 
-  /** The next alarm: a second from now while a bot runs (or when its wait ends), none while every bot is stopped. */
+  /**
+   * The next alarm: a second from now while a bot runs (or when its wait ends), none while every bot is stopped.
+   * While an alarm is at work this does nothing: that alarm keeps the alarm ahead of itself (the watchdog), takes
+   * in a bot started meanwhile (#joinable), and sets the next alarm as it ends, from the states as they are then.
+   */
   async #schedule(): Promise<void> {
+    if (this.#work) return;
     const now = this.#host.now();
     let next: number | null = null;
     for (const d of this.#defs.values()) {
@@ -564,8 +633,37 @@ export class Fleet {
       const at = Math.max(st.retryAt ?? 0, now + this.#t.nextMs);
       next = next === null ? at : Math.min(next, at);
     }
-    if (next === null) await this.#host.deleteAlarm();
-    else await this.#host.setAlarm(next);
+    if (next === null) {
+      // No bot runs: no session comes to take over from one that was cut off, so its note goes too.
+      if (this.#host.kv.get(WORK) !== undefined) this.#host.kv.delete(WORK);
+      await this.#host.deleteAlarm();
+    } else await this.#host.setAlarm(next);
+  }
+
+  /** How far ahead of itself an alarm keeps the alarm, after `cuts` alarms cut off one after another before it. */
+  #deadman(cuts: number): number {
+    return Math.min(this.#t.deadmanMaxMs, this.#t.deadmanMs * 2 ** Math.max(0, cuts - (CUTS_IN_A_ROW - 1)));
+  }
+
+  /** One line in the lines of each bot named: what the fleet has to say of the object as a whole. */
+  #sayTo(names: Iterable<string>, text: string): void {
+    for (const name of names) this.#line(name, `[${name}] ${text}`);
+  }
+
+  /**
+   * The bots whose session starts with this alarm are told that it comes after one that was cut off. The line
+   * speaks of the object, not of the bot's own last session: with several bots, the one that was cut off may have
+   * been another's.
+   */
+  #sayCut(cuts: number, deadmanMs: number, names: Iterable<string>): void {
+    const took = cuts === 1
+      ? 'The object was cut off in the middle of a session (a deploy, or Cloudflare restarting it): this session takes over.'
+      : `The object was cut off in the middle of a session ${cuts} times in a row: this session takes over.`;
+    const s = (ms: number) => Math.round(ms / 1000);
+    const later = deadmanMs > this.#t.deadmanMs
+      ? ` Should it be cut off within the next ${s(this.#t.provenMs)} s too, the next session starts only within ${s(deadmanMs)} s of that; after them, within ${s(this.#t.deadmanMs)} s again.`
+      : '';
+    this.#sayTo(names, `${took}${later}`);
   }
 
   /**
@@ -577,31 +675,87 @@ export class Fleet {
    */
   async alarm(): Promise<void> {
     const startedAt = this.#host.now();
-    // The backstop first: should this session be cut off (a deploy, a runtime update), the next one comes anyway.
-    await this.#host.setAlarm(startedAt + this.#t.deadmanMs);
-    const endAt = startedAt + this.#t.sessionMs;
-    const lastEnd = endAt + this.#t.overlapMs;
-    const regularOver = new AbortController();
-    const regular = new Set<Promise<void>>();
-    const extra = new Set<Promise<void>>();
-    const track = (set: Set<Promise<void>>, p: Promise<void>) => {
-      const q: Promise<void> = p.finally(() => { set.delete(q); });
-      set.add(q);
-    };
-    for (;;) {
-      if (this.#host.now() < endAt) {
-        for (const def of this.#joinable(endAt)) track(regular, this.#session(def, endAt));
-      } else if (regular.size > 0) {
-        for (const def of this.#joinable(lastEnd)) track(extra, this.#session(def, lastEnd, regularOver.signal));
+    if (this.#work) {
+      // The platform runs one alarm of an object at a time. Should one ever start while another is at work here,
+      // it starts no session and ends none: it moves the watchdog on, as the alarm at work does, and that is all.
+      await this.#host.setAlarm(startedAt + this.#work.deadmanMs);
+      return;
+    }
+    // A note left in storage: the alarm before this one never reached its end. Its sessions were cut off. (Whatever
+    // the note holds, it is a note; only a whole number in it counts.)
+    const left: unknown = this.#host.kv.get(WORK);
+    const kept = left !== null && typeof left === 'object' ? (left as { cuts?: unknown }).cuts : undefined;
+    const before = typeof kept === 'number' && Number.isSafeInteger(kept) && kept > 0 ? kept : 0;
+    const cuts = left === undefined ? 0 : Math.min(CUTS_COUNTED, before + 1);
+    const work = { deadmanMs: this.#deadman(cuts) };
+    this.#work = work;
+    try {
+      // The watchdog first: should this alarm's sessions be cut off (a deploy, a runtime update), the next one comes
+      // anyway. Only then its note: an alarm that cannot be set starts no session, so none is cut off, and the note
+      // stays as it was found for the next try.
+      await this.#host.setAlarm(startedAt + work.deadmanMs);
+      this.#host.kv.put(WORK, { cuts } satisfies Work);
+      let watchedAt = startedAt;
+      // Whether this alarm still counts as one of the cuts in a row, should it be cut off: until it has run for provenMs.
+      let counted = cuts > 0;
+      // Said once the alarm has been moved to the short distance again, not before.
+      let shortAgain = false;
+      const endAt = startedAt + this.#t.sessionMs;
+      const lastEnd = endAt + this.#t.overlapMs;
+      if (cuts > 0) this.#sayCut(cuts, work.deadmanMs, this.#joinable(endAt).map((d) => d.name));
+      const regularOver = new AbortController();
+      const regular = new Set<Promise<void>>();
+      const extra = new Set<Promise<void>>();
+      const track = (set: Set<Promise<void>>, p: Promise<void>) => {
+        const q: Promise<void> = p.finally(() => { set.delete(q); });
+        set.add(q);
+      };
+      for (;;) {
+        const now = this.#host.now();
+        if (counted && now - startedAt >= this.#t.provenMs) {
+          // This alarm has stayed at work: what cut the ones before it does not cut every alarm as it starts. The
+          // count starts again, and a long watchdog is short again from this turn on. A note that cannot be written
+          // changes nothing, like a move that fails: the sessions run on, and the next turn tries again.
+          try {
+            this.#host.kv.put(WORK, { cuts: 0 } satisfies Work);
+            counted = false;
+          } catch { /* the next turn tries again */ }
+          if (!counted && work.deadmanMs !== this.#t.deadmanMs) {
+            work.deadmanMs = this.#t.deadmanMs;
+            watchedAt = -Infinity;
+            shortAgain = true;
+          }
+        }
+        if (now - watchedAt >= this.#t.watchEveryMs) {
+          // The watchdog, moved on. A move that fails changes nothing (the alarm stays where it was) and is tried again at the next turn.
+          try {
+            await this.#host.setAlarm(now + work.deadmanMs);
+            watchedAt = now;
+            if (shortAgain) {
+              shortAgain = false;
+              this.#sayTo(this.#live.keys(), `No cut for ${Math.round(this.#t.provenMs / 1000)} s: should the object be cut off now, the next session starts within ${Math.round(work.deadmanMs / 1000)} s again.`);
+            }
+          } catch { /* the next turn tries again */ }
+        }
+        if (this.#host.now() < endAt) {
+          for (const def of this.#joinable(endAt)) track(regular, this.#session(def, endAt));
+        } else if (regular.size > 0) {
+          for (const def of this.#joinable(lastEnd)) track(extra, this.#session(def, lastEnd, regularOver.signal));
+        }
+        if (regular.size === 0) regularOver.abort();
+        if (regular.size === 0 && extra.size === 0) break;
+        await Promise.race([...regular, ...extra, this.#host.sleep(this.#t.joinPollMs)]);
       }
-      if (regular.size === 0) regularOver.abort();
-      if (regular.size === 0 && extra.size === 0) break;
-      await Promise.race([...regular, ...extra, this.#host.sleep(this.#t.joinPollMs)]);
+      // Every session reached its end: nothing was cut off.
+      this.#host.kv.delete(WORK);
+    } finally {
+      // Before the next alarm is set: a control call that comes meanwhile sets it itself again (#schedule).
+      if (this.#work === work) this.#work = null;
     }
     await this.#schedule();
   }
 
-  /** The cron's call: an alarm for the bots that should run, should none be set. */
+  /** The cron's call: an alarm for the bots that should run, should none be set. An alarm at work has one set: its watchdog. */
   async wake(): Promise<void> {
     if ((await this.#host.getAlarm()) === null) await this.#schedule();
   }

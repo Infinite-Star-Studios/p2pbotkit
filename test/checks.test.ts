@@ -31,7 +31,7 @@ import { PhaReader, type PhaRpc, type PhaCall, type PhaBalance, type PhaTxState 
 import { BaseReader, SATURN_SWAP_ABI, USDC_ABI, LOG_CHUNK, LOG_STEPS, SEARCH_WIDEN_MAX, isRangeError, isRateLimit, isRateLimitCode, pinnedDomainSeparator, sendRefused, notSendable, feesFor, replacementFees, bumpFee, type BaseClient, type BaseBlock, type BaseLog, type BaseReceipt, type ReadCall, type TxCall, type Hex } from '../src/base.js';
 import * as checks from '../src/checks.js';
 import { CHECK_CODES, type CheckDeps, type Problem, type TradeReader } from '../src/checks.js';
-import { createSigner, SignRefusal, type Signer } from '../src/signer.js';
+import { createSigner, newSignGuards, SignRefusal, type Signer, type SignGuards } from '../src/signer.js';
 import type { Trade, LocalTrade, LocalOffer, SecretRecord } from '../src/types.js';
 
 // ── The devnet escrow as the node serves it ────────────────────────────────
@@ -985,6 +985,117 @@ describe('D. the seller\'s lock', () => {
     await v.store.close();
     await signRefused(v.signer.lockPha(c.intent), 'STORE_CLOSED');
     assert.equal(v.sends(), 0);
+  });
+
+  test('27/61: a host\'s own marks (guards): its signers share them; a flow cut off with the host leaves its mark there for good, and under the marks of the host\'s next life the trade is signed for again', async () => {
+    const wait = { phaTries: 1, phaIntervalMs: 0, baseTimeoutMs: 1, basePollMs: 1, allowanceTries: 2, allowancePollMs: 0 };
+    const signerOf = (x: World, guards: SignGuards) => createSigner({ keys: K, pha: x.pha, base: x.base, store: x.store, now: () => x.clock.ms, sleep: async () => {}, wait, guards });
+    const never = new Promise<never>(() => {});
+    /** The next call of `obj[name]` never answers (the flow that makes it is cut off there); resolves once that call is made. */
+    const cutAt = (obj: object, name: string): Promise<void> => new Promise<void>((reached) => {
+      const o = obj as Record<string, unknown>;
+      const real = o[name];
+      o[name] = () => { o[name] = real; reached(); return never; };
+    });
+    // A lock whose flow never ends: its host was reset under it, and nothing of it runs again.
+    const w = await world('S');
+    const a = await checks.sellerLock(w.deps, w.trade, w.rec);
+    const b = await checks.sellerLock(w.deps, w.trade, w.rec);
+    const c = await checks.sellerLock(w.deps, w.trade, w.rec);
+    assert.ok(a.ok && b.ok && c.ok);
+    if (!a.ok || !b.ok || !c.ok) return;
+    const life1 = newSignGuards();
+    const atBoard = cutAt(w.board, 'trade');
+    void signerOf(w, life1).lockPha(a.intent);
+    await atBoard;
+    assert.deepEqual([...life1.busy], ['devnet:7'], 'the mark of the flow under way');
+    // Under the same marks every later flow of that trade is refused, from any signer: what the process's own marks
+    // would do to a host whose process outlives it.
+    await signRefused(signerOf(w, life1).lockPha(b.intent), 'LOCK_BUSY');
+    assert.equal(w.pha.sent.length, 0);
+    // Under the marks of the host's next life the trade is signed for.
+    const life2 = newSignGuards();
+    assert.equal((await signerOf(w, life2).lockPha(c.intent)).outcome, 'confirmed');
+    assert.equal(w.pha.sent.length, 1);
+    assert.equal(life2.busy.size, 0, 'a flow that ends removes its mark');
+    assert.deepEqual([...life1.busy], ['devnet:7'], 'the mark of the flow that was cut off stays where it was');
+
+    // The same for the mark of a claim in flight.
+    const u = await sellerAfterLocks();
+    const d = await checks.selfClaim(u.deps, (await u.store.getTrade(7))!);
+    const e = await checks.selfClaim(u.deps, (await u.store.getTrade(7))!);
+    const f = await checks.selfClaim(u.deps, (await u.store.getTrade(7))!);
+    assert.ok(d.ok && e.ok && f.ok);
+    if (!d.ok || !e.ok || !f.ok) return;
+    const first = newSignGuards();
+    const atCode = cutAt(u.base, 'code');
+    void signerOf(u, first).claimBase(d.intent);
+    await atCode;
+    assert.equal(first.claiming.size, 1);
+    assert.deepEqual([...first.busy], ['devnet:7']);
+    await signRefused(signerOf(u, first).claimBase(e.intent), 'CLAIM_IN_FLIGHT');
+    assert.equal(u.base.sent.length, 0);
+    const next = newSignGuards();
+    assert.equal((await signerOf(u, next).claimBase(f.intent)).outcome, 'confirmed');
+    assert.equal(u.base.sent.length, 1);
+    assert.equal(next.claiming.size + next.busy.size, 0);
+
+    // The process's own marks are another set: a signer given none shares them with every other such signer (the
+    // test above), and sees nothing of a host's.
+    const p = await world('S');
+    const g = await checks.sellerLock(p.deps, p.trade, p.rec);
+    const h = await checks.sellerLock(p.deps, p.trade, p.rec);
+    assert.ok(g.ok && h.ok);
+    if (!g.ok || !h.ok) return;
+    const own = newSignGuards();
+    const there = cutAt(p.board, 'trade');
+    void signerOf(p, own).lockPha(g.intent);
+    await there;
+    assert.deepEqual([...own.busy], ['devnet:7']);
+    assert.equal((await p.signer.lockPha(h.intent)).outcome, 'confirmed', 'the process\'s marks hold nothing of that host\'s flow');
+    assert.equal(p.pha.sent.length, 1);
+
+    // Two signers that are given no marks share the process's, whatever store or keys they are built on.
+    const q = await world('S');
+    const i1 = await checks.sellerLock(q.deps, q.trade, q.rec);
+    const i2 = await checks.sellerLock(q.deps, q.trade, q.rec);
+    assert.ok(i1.ok && i2.ok);
+    if (!i1.ok || !i2.ok) return;
+    let release!: () => void;
+    q.board.gate = new Promise<void>((r) => { release = r; });
+    const running = q.signer.lockPha(i1.intent);
+    await new Promise((r) => setImmediate(r));
+    const other = createSigner({ keys: K, pha: q.pha, base: q.base, store: q.store, now: () => q.clock.ms, sleep: async () => {}, wait });
+    await signRefused(other.lockPha(i2.intent), 'LOCK_BUSY');
+    release();
+    q.board.gate = null;
+    assert.equal((await running).outcome, 'confirmed');
+    assert.equal(q.pha.sent.length, 1);
+
+    // And the other way round: a flow under the process's marks holds nothing back under a host's.
+    const z = await world('S');
+    const z1 = await checks.sellerLock(z.deps, z.trade, z.rec);
+    const z2 = await checks.sellerLock(z.deps, z.trade, z.rec);
+    assert.ok(z1.ok && z2.ok);
+    if (!z1.ok || !z2.ok) return;
+    let free!: () => void;
+    const hold = new Promise<void>((r) => { free = r; });
+    const tradeOfBoard = z.board.trade.bind(z.board);
+    let waiting = false;
+    z.board.trade = async (id) => { if (!waiting) { waiting = true; await hold; } return tradeOfBoard(id); };
+    const underProcess = z.signer.lockPha(z1.intent);
+    for (let i = 0; i < 200 && !waiting; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(waiting, true, 'the flow under the process\'s marks is under way');
+    assert.equal((await signerOf(z, newSignGuards()).lockPha(z2.intent)).outcome, 'confirmed', 'a host\'s marks hold nothing of the process\'s');
+    assert.equal(z.pha.sent.length, 1);
+    // Let the first flow end, so that the process's marks are as they were for the tests that follow.
+    free();
+    await underProcess.catch(() => undefined);
+
+    // Anything else than marks is refused before a signer exists.
+    for (const bad of [{}, { busy: new Set<string>() }, { claiming: new Set<string>() }, { busy: [], claiming: [] }, null]) {
+      assert.throws(() => createSigner({ keys: K, pha: w.pha, base: w.base, store: w.store, guards: bad as never }), (x: unknown) => x instanceof SafetyError && x.code === 'BAD_INPUT' && /newSignGuards/.test(x.detail));
+    }
   });
 });
 

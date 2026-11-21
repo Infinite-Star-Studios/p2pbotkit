@@ -33,7 +33,9 @@ Workers Paid plan: $5 a month.
 - **One object for every bot, always running:** 30 days of 128 MB is about
   332,000 GB-s, inside the 400,000 GB-s the plan includes. Its requests
   (an alarm per session, the 10-minute cron, your calls) are about 12,000
-  a month, of the million included; its storage is a few megabytes.
+  a month, of the million included; its storage is a few megabytes, and
+  moving its alarm on every 10 s is about 260,000 rows written a month, of
+  the 50 million included.
 - So the bots cost the plan's $5, as long as the account's other Durable
   Objects leave room in what the plan includes (past it, $12.50 per
   million GB-s, and $0.15 per million requests).
@@ -195,9 +197,10 @@ address.
 ## Day to day
 
 - **A new config:** edit your `bots.json`, then `npm run deploy`. A deploy
-  restarts the object; the running session is cut short, and the next one
-  starts with the new config, which keeps listed what it lists and cancels
-  what it no longer lists, as a restart does on a machine.
+  restarts the object; the running session is cut off, and the next one
+  starts within half a minute, with the new config, which keeps listed what
+  it lists and cancels what it no longer lists, as a restart does on a
+  machine.
 - **A new kit version:** `git pull` in the kit's folder, `npm ci
   --ignore-scripts` in both folders, then `npm run deploy` here. The deploy
   is the whole upgrade: the next session runs the new version, with no new
@@ -243,9 +246,20 @@ address.
   the next session. The fleet's other bots do not wait for it: a bot whose
   session has ended goes on in a short extra session meanwhile.
 - **A cut session** (a deploy, a Cloudflare runtime update, an eviction) is
-  a restart: the object's alarm runs the next session, which takes the
-  store's lock over (its log says so), settles every open request and send
-  from the board and the chains, and sends nothing blindly twice.
+  a restart. While its sessions run, the object keeps its alarm 30 s ahead
+  of itself, moving it on every 10 s, so the next session starts within
+  30 s of the cut, while the offers are still listed (an offer stays listed
+  for 90 s without a heartbeat). It says that the object was cut off in the
+  middle of a session, takes the store's lock over (its log says so),
+  settles every open request and send from the board and the chains, and
+  sends nothing blindly twice. A listing or an order whose answer the cut
+  took is not sent again until the board has said whether it was made: that
+  offer is then not listed for up to two minutes. Cuts in a row come
+  further apart. A row is a cut followed by more, each within a minute of
+  the start of the session it cuts: its first three cuts are followed as
+  above, the fourth within a minute, and each further one twice as late, up
+  to 15.5 minutes. A session that has run for a minute ends the row, so
+  deploys a few minutes apart are each followed within 30 s.
 - **The lines** are redacted as on a machine: never a key, a control token
   or a swap secret. The Worker's logs (Workers Logs) keep them for a few
   days.

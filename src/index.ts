@@ -46,7 +46,7 @@ import { devnetFaucet, type FaucetOutcome } from './faucet.js';
 import { phaRpc, PhaReader, balanceOf, type PhaRpc } from './pha.js';
 import { baseClient, BaseReader, type BaseClient } from './base.js';
 import * as checks from './checks.js';
-import { createSigner, type SignerDeps } from './signer.js';
+import { createSigner, isSignGuards, type SignerDeps, type SignGuards } from './signer.js';
 import { amountText } from './rules.js';
 import { Engine, flowError, type ClaimMode, type OfferInput, type Policy, type StepResult } from './flows/maker.js';
 import { Taker } from './flows/taker.js';
@@ -127,6 +127,14 @@ export interface KitInternals {
   /** How the signer waits for outcomes. */
   signerSleep?: SignerDeps['sleep'];
   signerWait?: SignerDeps['wait'];
+  /**
+   * The marks of the signing flows under way (one per trade, one USDC claim
+   * per h), in place of the process's own: for a host that can be reset while
+   * its process lives on (a Durable Object). It gives every kit it builds the
+   * same marks, and makes new ones (newSignGuards) each time it starts anew:
+   * a flow that was cut off with it then leaves no mark behind.
+   */
+  signGuards?: SignGuards;
   /** Checked for key material instead of process.argv. */
   argv?: readonly string[];
   /** The store's key file (null: no sealing); default env KIT_STORE_KEY_FILE. */
@@ -321,6 +329,10 @@ async function buildKit(o: Omit<KitOptions, 'phaKeyFile' | 'baseKeyFile' | 'data
   const claimMode: ClaimMode = o.claimMode ?? 'self';
   if (claimMode !== 'self' && claimMode !== 'reveal-then-self') throw flowError('BAD_INPUT', 'claimMode is "self" or "reveal-then-self".');
   if (o.usePermit !== undefined && typeof o.usePermit !== 'boolean') throw flowError('BAD_INPUT', 'usePermit is true or false.');
+  // Refused here, before anything is read or the store is opened (the signer, which checks it too, is built after both).
+  if (o.internals?.signGuards !== undefined && !isSignGuards(o.internals.signGuards)) {
+    throw flowError('BAD_INPUT', 'internals.signGuards holds the marks of the signing flows under way: what newSignGuards() gives.');
+  }
   host.check();
   const log = redactedLog(o.log);
   const io = o.internals ?? {};
@@ -351,7 +363,10 @@ async function buildKit(o: Omit<KitOptions, 'phaKeyFile' | 'baseKeyFile' | 'data
 
   const store = await host.store({ network, env, log, now });
   try {
-    const signer = createSigner({ keys, pha: phaT, base: baseT, store, now, log, ...(io.signerSleep ? { sleep: io.signerSleep } : {}), ...(io.signerWait ? { wait: io.signerWait } : {}) });
+    const signer = createSigner({
+      keys, pha: phaT, base: baseT, store, now, log,
+      ...(io.signerSleep ? { sleep: io.signerSleep } : {}), ...(io.signerWait ? { wait: io.signerWait } : {}), ...(io.signGuards !== undefined ? { guards: io.signGuards } : {})
+    });
     const session = new BoardSession({ board, store, log, now });
     // The checks read the board's trade with a short retry budget: an intent is good for 60 s.
     const deps: checks.CheckDeps = {
@@ -516,7 +531,8 @@ export type { FaucetOutcome, FaucetClaim } from './faucet.js';
 export { SafetyError, BoardError, SAFETY, isSafetyError, isBoardError } from './errors.js';
 export { CHECK_CODES, DONE_ELSEWHERE, instantBuyerLockProblem, instantWindowProblem, instantSwapReadsProblem } from './checks.js';
 export type { Problem, CheckId } from './checks.js';
-export { SIGNER_CODES } from './signer.js';
+export { SIGNER_CODES, newSignGuards } from './signer.js';
+export type { SignGuards } from './signer.js';
 export { redact, shortHex } from './redact.js';
 export { P2P_TOKENS, P2P_CONFIG, BOARD, INSTANT, INSTANT_NETWORKS, INSTANT_RULES, instantTiming, instantBaseSpan, tokenOf, networkProblem, phaRpcProblem, baseRpcProblem } from './pins.js';
 export type { InstantTiming } from './pins.js';

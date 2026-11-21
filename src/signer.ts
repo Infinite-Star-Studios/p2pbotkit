@@ -217,12 +217,46 @@ export interface SignerDeps {
   readonly sleep?: (ms: number) => Promise<void>;
   /** For tests: how long and how often outcomes are read. */
   readonly wait?: { phaTries?: number; phaIntervalMs?: number; baseTimeoutMs?: number; basePollMs?: number; allowanceTries?: number; allowancePollMs?: number };
+  /**
+   * The marks of the signing flows under way, in place of the process's own:
+   * for a host that can lose what it runs while its process lives on (a
+   * Durable Object that is reset in place keeps its module's memory). A flow
+   * cut off with such a host never removes its mark, and under the process's
+   * marks its trade could never be signed for again. The host gives every
+   * signer it builds the same marks, and makes new ones with each of its own
+   * lives (newSignGuards).
+   */
+  readonly guards?: SignGuards;
 }
 
-/** One signing flow per trade in this process (check 27), across every signer. */
-const BUSY = new Set<string>();
-/** One USDC claim per h in flight (check 61). */
-const CLAIMING = new Set<string>();
+/**
+ * The marks of the signing flows under way: one signing flow per trade
+ * (check 27), and one USDC claim per h in flight (check 61). A flow sets its
+ * mark as it starts and removes it as it ends, whatever its end.
+ */
+export interface SignGuards {
+  /** `network:tradeId` of each trade with a signing flow under way. */
+  readonly busy: Set<string>;
+  /** h of each USDC claim in flight. */
+  readonly claiming: Set<string>;
+}
+
+/** New marks, with nothing under way. */
+export function newSignGuards(): SignGuards {
+  return { busy: new Set<string>(), claiming: new Set<string>() };
+}
+
+/** Whether `x` is a pair of marks, as newSignGuards() gives it. */
+export function isSignGuards(x: unknown): x is SignGuards {
+  return x instanceof Object && (x as Partial<SignGuards>).busy instanceof Set && (x as Partial<SignGuards>).claiming instanceof Set;
+}
+
+/**
+ * The process's own marks, shared by every signer that is given no others:
+ * one signing flow per trade in this process, across every signer. They end
+ * with the process.
+ */
+const PROCESS_GUARDS: SignGuards = newSignGuards();
 
 /** Signs for one network with one bot's keys. Use createSigner(). */
 export class Signer {
@@ -240,6 +274,7 @@ export class Signer {
   readonly #wait: NonNullable<SignerDeps['wait']>;
   readonly #nonces: NonceManager;
   readonly #cfg: P2PNetConfig;
+  readonly #guards: SignGuards;
 
   constructor(d: SignerDeps) {
     const network = d.keys?.network;
@@ -262,6 +297,10 @@ export class Signer {
     this.#wait = d.wait ?? {};
     this.#nonces = new NonceManager(d.base);
     if (d.store.network !== network) throw new SafetyError(SAFETY.NETWORK_OFF, 'The store is for another network than the keys.');
+    if (d.guards !== undefined && !isSignGuards(d.guards)) {
+      throw new SafetyError('BAD_INPUT', 'guards holds the marks of the signing flows under way: what newSignGuards() gives.');
+    }
+    this.#guards = d.guards ?? PROCESS_GUARDS;
   }
 
   // ── The gate ──────────────────────────────────────────────────────────────
@@ -290,13 +329,14 @@ export class Signer {
   /** Run `fn` while no other signing flow of this trade runs (check 27), with the store's lock asserted first. */
   async #exclusive<T>(network: Network, tradeId: number, fn: () => Promise<T>): Promise<T> {
     const key = `${network}:${tradeId}`;
-    if (BUSY.has(key)) throw new SignRefusal('LOCK_BUSY', `A signing flow of trade #${tradeId} is already running. Nothing else was signed.`, { check: 27, retry: true });
-    BUSY.add(key);
+    const busy = this.#guards.busy;
+    if (busy.has(key)) throw new SignRefusal('LOCK_BUSY', `A signing flow of trade #${tradeId} is already running. Nothing else was signed.`, { check: 27, retry: true });
+    busy.add(key);
     try {
       await this.#store.assertLock();
       return await fn();
     } finally {
-      BUSY.delete(key);
+      busy.delete(key);
     }
   }
 
@@ -688,8 +728,9 @@ export class Signer {
   async claimBase(intent: Checked<'claimBase'>): Promise<SendResult> {
     this.#take(intent, 'claimBase');
     const f = intent.facts;
-    if (CLAIMING.has(f.h)) throw new SignRefusal('CLAIM_IN_FLIGHT', 'A claim with this secret is already in flight. Nothing else was sent.', { check: 61, retry: true });
-    CLAIMING.add(f.h);
+    const claiming = this.#guards.claiming;
+    if (claiming.has(f.h)) throw new SignRefusal('CLAIM_IN_FLIGHT', 'A claim with this secret is already in flight. Nothing else was sent.', { check: 61, retry: true });
+    claiming.add(f.h);
     try {
       return await this.#exclusive(intent.network, f.tradeId, async () => {
         const at = await this.#sendsAt(f.tradeId, 'claimBase', f.follow);
@@ -717,7 +758,7 @@ export class Signer {
         return this.#baseOutcome(intent, sent);
       });
     } finally {
-      CLAIMING.delete(f.h);
+      claiming.delete(f.h);
     }
   }
 
