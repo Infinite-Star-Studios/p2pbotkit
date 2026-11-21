@@ -160,8 +160,8 @@ listed amount when that is smaller, and under `min` nothing is listed. So a
 grow: set `total` to the most you would ever want listed, and `max` to the
 most one trade may take. One offer holds at most 100,000 C, 10,000 RA,
 10,000,000 TAZ, 100,000,000 SOUL or 300,000,000 KCAL; one trade takes at
-most 10,000 C, 5,000 RA, 100,000 TAZ, 1,000,000 SOUL or 30,000,000 KCAL,
-and costs at most 10,000 USDC on mainnet.
+most 100,000 C, 5,000 RA, 100,000 TAZ, 1,000,000 SOUL or 30,000,000 KCAL,
+and costs at most 100,000 USDC.
 When an entry's own `total` is what holds an offer under what the bot could
 list, the bot says so at each look.
 

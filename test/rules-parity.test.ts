@@ -305,7 +305,7 @@ add('followOfferProblem', 'no limit price, a buy', [followForm({ limitPrice: nul
 add('followOfferProblem', 'limit price above priceMax', [followForm({ limitPrice: 1_000_000_000_001n })], 'devnet');
 add('followOfferProblem', 'amounts missing', [followForm({}, { tazMin: null })], 'devnet');
 add('followOfferProblem', 'smallest trade under 1 USDC at the limit', [followForm({ limitPrice: 1n })], 'devnet');
-add('followOfferProblem', 'largest trade over the mainnet lock maximum at the limit', [followForm({ limitPrice: 250_000_000n })], 'mainnet');
+add('followOfferProblem', 'largest trade over the mainnet lock maximum at the limit', [followForm({ limitPrice: 2_500_000_000n })], 'mainnet');
 add('followOfferProblem', 'no amount per day', [followForm({ dailyMax: null })], 'devnet');
 add('followOfferProblem', 'per day above the total', [followForm({ dailyMax: 101n * TAZ_1 })], 'devnet');
 add('followOfferProblem', 'per day under the smallest trade', [followForm({ dailyMax: 9n * TAZ_1 })], 'devnet');
@@ -346,7 +346,7 @@ add('takeProblem', 'above what remains', [4n * TAZ_1, takeOffer({ remaining: 3n 
 add('takeProblem', 'below the token minimum', [TAZ_1 / 2n, takeOffer({ tazMin: 1n })], 'devnet');
 add('takeProblem', 'price above priceMax', [2n * TAZ_1, takeOffer({ price: 1_000_000_000_001n })], 'devnet');
 add('takeProblem', 'under 1 USDC', [TAZ_1, takeOffer({ price: 500_000n })], 'devnet');
-add('takeProblem', 'over the mainnet maximum', [5n * TAZ_1, takeOffer({ price: 3_000_000_000n })], 'mainnet');
+add('takeProblem', 'over the mainnet maximum', [5n * TAZ_1, takeOffer({ price: 30_000_000_000n })], 'mainnet');
 add('takeProblem', 'SOUL', [2n * 100_000_000n, takeOffer({ symbol: 'SOUL', tazMin: 100_000_000n, tazMax: 50n * 100_000_000n, price: 11_200_000n })], 'devnet');
 
 // openCapProblem(cap, amount, symbol)

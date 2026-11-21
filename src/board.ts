@@ -316,7 +316,8 @@ export function parseTrade(v: unknown, network: Network): Trade | null {
 
 function tradeRef(v: unknown): TradeRef | null {
   if (!isRec(v)) return null;
-  const basis = v.basis === 'p2p' || v.basis === 'via_soul' || v.basis === 'feed' ? v.basis : null;
+  // unit: C, which Saturn counts as exactly 1 USD (p2p/changes/CHG-40-3.md). Any other basis is null.
+  const basis = v.basis === 'p2p' || v.basis === 'via_soul' || v.basis === 'feed' || v.basis === 'unit' ? v.basis : null;
   return {
     soulUsd: finiteOrNull(v.soulUsd), dexUsd: finiteOrNull(v.dexUsd), lineUsd: finiteOrNull(v.lineUsd), basis,
     tazPerRa: finiteOrNull(v.tazPerRa), at: numOr0(v.at)

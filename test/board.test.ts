@@ -34,7 +34,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  BoardClient, BoardSession, CreateError, OfferPoller, TradePoller, BOARD_ERRORS, BOARD_SAFETY, retryRuleOf, parseOffer, parseTrade,
+  BoardClient, BoardSession, CreateError, OfferPoller, TradePoller, BOARD_ERRORS, BOARD_SAFETY, retryRuleOf, parseOffer, parseTrade, parseFeedTrade,
   RETRY_AFTER_MAX, REPLAY_MIN_AGE_MS, UNCHANGED_PAUSE_MS
 } from '../src/board.js';
 import { devnetFaucet, faucetClaimLines } from '../src/faucet.js';
@@ -1377,5 +1377,20 @@ describe('the devnet faucet client', () => {
     assert.equal(e.reason, 'address');
     await rejects(devnetFaucet(board, {}), SafetyError, 'BAD_INPUT');
     await rejects(devnetFaucet(board, { base: '0x' + '0'.repeat(40) }), SafetyError, 'BAD_INPUT');
+  });
+});
+
+describe('the public feed: the prices saved at a take (p2p/changes/CHG-40-3.md)', () => {
+  const trade = (ref: unknown) => ({
+    id: 7, network: 'devnet', symbol: 'C', offerSide: 'sell', takerSide: 'buy', taz: '5000000', usdc: '5000000', price: '1000000', feeBps: 50,
+    createdAt: 1794528000, acceptedAt: 1794528010, endedAt: 1794528300, seller: { pha: S_P, base: S_B }, buyer: { pha: B_P, base: B_B }, proof: {}, ref
+  });
+  const ref = { soulUsd: 0.00692931, dexUsd: 7.9667, lineUsd: 1, basis: 'unit', tazPerRa: 31.01, at: 1794528000 };
+
+  test('basis unit (C, which Saturn counts as exactly 1 USD) is read as it is; p2p, via_soul and feed too; any other basis is null', () => {
+    assert.deepEqual(parseFeedTrade(trade(ref), 'devnet')!.ref, ref);
+    for (const b of ['p2p', 'via_soul', 'feed']) assert.equal(parseFeedTrade(trade({ ...ref, basis: b }), 'devnet')!.ref!.basis, b);
+    for (const b of ['bogus', 'Unit', '', null, undefined, 1]) assert.equal(parseFeedTrade(trade({ ...ref, basis: b }), 'devnet')!.ref!.basis, null, String(b));
+    assert.equal(parseFeedTrade(trade(null), 'devnet')!.ref, null);
   });
 });

@@ -16,16 +16,16 @@ test('the table lists C, RA, TAZ, SOUL and KCAL, in that order (the site\'s orde
   assert.deepEqual(P2P_TOKENS.map((t) => t.symbol), ['C', 'RA', 'TAZ', 'SOUL', 'KCAL']);
 });
 
-test('C\'s row: 6 decimals, 1 to 10,000 C a lock, 100,000 C an offer, neither gas nor stake', () => {
+test('C\'s row: 6 decimals, 1 to 100,000 C a lock, 100,000 C an offer, neither gas nor stake', () => {
   const c = tokenOf('C');
   assert.ok(c);
   assert.deepEqual({ ...c }, {
-    symbol: 'C', decimals: 6, min: 1_000_000n, max: 10_000_000_000n, offerMax: 100_000_000_000n,
+    symbol: 'C', decimals: 6, min: 1_000_000n, max: 100_000_000_000n, offerMax: 100_000_000_000n,
     priceMax: 1_000_000_000_000n, gas: false, stake: false, enabled: true
   });
   assert.ok(Object.isFrozen(c));
   assert.equal(amountText(c.min, c.decimals), '1');
-  assert.equal(amountText(c.max, c.decimals), '10,000');
+  assert.equal(amountText(c.max, c.decimals), '100,000');
   assert.equal(amountText(c.offerMax, c.decimals), '100,000');
   // Exact: no other case, no spaces.
   for (const s of ['c', ' C', 'C ', 'CC', 'Credits']) assert.equal(tokenOf(s), null, s);
@@ -40,7 +40,7 @@ test('C\'s maths: unitOf is 10^6, usdcFor divides by it, text to raw takes at mo
   assert.equal(usdcFor(1n, 999_999n, 'C'), 0n);
   assert.equal(tokenToRaw('C', '2.5'), 2_500_000n);
   assert.equal(tokenToRaw('C', '0.000001'), 1n);
-  assert.equal(toRaw('10000', 6, 'The amount'), tokenOf('C')!.max);
+  assert.equal(toRaw('100000', 6, 'The amount'), tokenOf('C')!.max);
   for (const text of ['0.0000001', '1.1234567']) {
     assert.throws(() => tokenToRaw('C', text), (e: unknown) => e instanceof SafetyError && /more than 6 decimal places/.test(e.message), text);
   }
@@ -51,7 +51,9 @@ test('an offer of C inside its row passes check 7; one past its row is refused',
   const b = { usdcMin: P2P_CONFIG.mainnet.base.usdcMin, usdcMax: P2P_CONFIG.mainnet.base.usdcMax };
   const ok = { symbol: 'C', tazTotal: 100_000_000n, tazMin: 1_000_000n, tazMax: 10_000_000n, price: 1_000_000n };
   assert.equal(offerProblem(ok, b), null);
-  assert.notEqual(offerProblem({ ...ok, tazMax: 10_000_000_001n, tazTotal: 20_000_000_000n }, b), null, 'above 10,000 C a lock');
+  // One lock of 100,000 C at 1 USDC is mainnet's largest trade, 100,000 USDC: the whole offer in one lock.
+  assert.equal(offerProblem({ ...ok, tazTotal: 100_000_000_000n, tazMax: 100_000_000_000n }, b), null);
+  assert.equal(offerProblem({ ...ok, tazMax: 100_000_000_001n, tazTotal: 100_000_000_001n }, b), 'The largest trade is at most 100,000 C.', 'above 100,000 C a lock');
   assert.notEqual(offerProblem({ ...ok, tazTotal: 100_000_000_001n }, b), null, 'above 100,000 C an offer');
   assert.equal(offerProblem({ ...ok, symbol: 'DOGE' }, b), 'Pick one of the tokens this site trades: C, RA, TAZ, SOUL or KCAL.');
 });

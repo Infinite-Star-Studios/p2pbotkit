@@ -251,7 +251,7 @@ export interface TradeRef {
   soulUsd: number | null;
   dexUsd: number | null;
   lineUsd: number | null;
-  basis: 'p2p' | 'via_soul' | 'feed' | null;
+  basis: 'p2p' | 'via_soul' | 'feed' | 'unit' | null;
   tazPerRa: number | null;
   at: number;
 }
@@ -378,7 +378,8 @@ export interface Me {
 
 // ── /v1/prices/reference (section 2.3.6) ───────────────────────────────────
 
-export type RefBasis = 'p2p' | 'via_soul' | 'feed';
+/** unit: C, which Saturn counts as exactly 1 USD (its unit of account; not a market price and not a promise to redeem). */
+export type RefBasis = 'p2p' | 'via_soul' | 'feed' | 'unit';
 
 export interface RefP2P {
   value: number | null;
